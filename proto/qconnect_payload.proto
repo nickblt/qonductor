@@ -1,0 +1,395 @@
+syntax = "proto2";
+package qconnect;
+
+import "qconnect_common.proto";
+import "qconnect_queue.proto";
+
+// Batch container inside outer WebSocket payload
+message QConnectBatch {
+  optional fixed64 messages_time = 1;  // ms epoch
+  optional int32 messages_id = 2;
+  repeated QConnectMessage messages = 3;
+}
+
+// Message type markers
+enum QConnectMessageType {
+  MESSAGE_TYPE_UNKNOWN = 0;
+  MESSAGE_TYPE_ERROR = 1;
+
+  // Renderer <-> Server
+  MESSAGE_TYPE_RNDR_SRVR_JOIN_SESSION = 21;
+  MESSAGE_TYPE_RNDR_SRVR_DEVICE_INFO_UPDATED = 22;
+  MESSAGE_TYPE_RNDR_SRVR_STATE_UPDATED = 23;
+  MESSAGE_TYPE_RNDR_SRVR_RENDERER_ACTION = 24;
+  MESSAGE_TYPE_RNDR_SRVR_VOLUME_CHANGED = 25;
+  MESSAGE_TYPE_RNDR_SRVR_FILE_AUDIO_QUALITY_CHANGED = 26;
+  MESSAGE_TYPE_RNDR_SRVR_DEVICE_AUDIO_QUALITY_CHANGED = 27;
+  MESSAGE_TYPE_RNDR_SRVR_MAX_AUDIO_QUALITY_CHANGED = 28;
+  MESSAGE_TYPE_RNDR_SRVR_VOLUME_MUTED = 29;
+
+  MESSAGE_TYPE_SRVR_RNDR_SET_STATE = 41;
+  MESSAGE_TYPE_SRVR_RNDR_SET_VOLUME = 42;
+  MESSAGE_TYPE_SRVR_RNDR_SET_ACTIVE = 43;
+  MESSAGE_TYPE_SRVR_RNDR_SET_MAX_AUDIO_QUALITY = 44;
+  MESSAGE_TYPE_SRVR_RNDR_SET_LOOP_MODE = 45;
+  MESSAGE_TYPE_SRVR_RNDR_SET_SHUFFLE_MODE = 46;
+  MESSAGE_TYPE_SRVR_RNDR_SET_AUTOPLAY_MODE = 47;
+
+  // Controller -> Server
+  MESSAGE_TYPE_CTRL_SRVR_JOIN_SESSION = 61;
+  MESSAGE_TYPE_CTRL_SRVR_SET_PLAYER_STATE = 62;
+  MESSAGE_TYPE_CTRL_SRVR_SET_ACTIVE_RENDERER = 63;
+  MESSAGE_TYPE_CTRL_SRVR_SET_VOLUME = 64;
+  MESSAGE_TYPE_CTRL_SRVR_CLEAR_QUEUE = 65;
+  MESSAGE_TYPE_CTRL_SRVR_QUEUE_LOAD_TRACKS = 66;
+  MESSAGE_TYPE_CTRL_SRVR_QUEUE_INSERT_TRACKS = 67;
+  MESSAGE_TYPE_CTRL_SRVR_QUEUE_ADD_TRACKS = 68;
+  MESSAGE_TYPE_CTRL_SRVR_QUEUE_REMOVE_TRACKS = 69;
+  MESSAGE_TYPE_CTRL_SRVR_QUEUE_REORDER_TRACKS = 70;
+  MESSAGE_TYPE_CTRL_SRVR_SET_SHUFFLE_MODE = 71;
+  MESSAGE_TYPE_CTRL_SRVR_SET_LOOP_MODE = 72;
+  MESSAGE_TYPE_CTRL_SRVR_MUTE_VOLUME = 73;
+  MESSAGE_TYPE_CTRL_SRVR_SET_MAX_AUDIO_QUALITY = 74;
+  MESSAGE_TYPE_CTRL_SRVR_SET_QUEUE_STATE = 75;
+  MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_QUEUE_STATE = 76;
+  MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_RENDERER_STATE = 77;
+  MESSAGE_TYPE_CTRL_SRVR_SET_AUTOPLAY_MODE = 78;
+  MESSAGE_TYPE_CTRL_SRVR_AUTOPLAY_ADD_TRACKS = 79;
+  MESSAGE_TYPE_CTRL_SRVR_AUTOPLAY_REMOVE_TRACKS = 80;
+
+  // Server -> Controllers
+  MESSAGE_TYPE_SRVR_CTRL_SESSION_STATE = 81;
+  MESSAGE_TYPE_SRVR_CTRL_RENDERER_STATE_UPDATED = 82;
+  MESSAGE_TYPE_SRVR_CTRL_ADD_RENDERER = 83;
+  MESSAGE_TYPE_SRVR_CTRL_UPDATE_RENDERER = 84;
+  MESSAGE_TYPE_SRVR_CTRL_REMOVE_RENDERER = 85;
+  MESSAGE_TYPE_SRVR_CTRL_ACTIVE_RENDERER_CHANGED = 86;
+  MESSAGE_TYPE_SRVR_CTRL_VOLUME_CHANGED = 87;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_ERROR_MESSAGE = 88;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_CLEARED = 89;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_STATE = 90;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_TRACKS_LOADED = 91;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_TRACKS_INSERTED = 92;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_TRACKS_ADDED = 93;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_TRACKS_REMOVED = 94;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_TRACKS_REORDERED = 95;
+  MESSAGE_TYPE_SRVR_CTRL_SHUFFLE_MODE_SET = 96;
+  MESSAGE_TYPE_SRVR_CTRL_LOOP_MODE_SET = 97;
+  MESSAGE_TYPE_SRVR_CTRL_VOLUME_MUTED = 98;
+  MESSAGE_TYPE_SRVR_CTRL_MAX_AUDIO_QUALITY_CHANGED = 99;
+  MESSAGE_TYPE_SRVR_CTRL_FILE_AUDIO_QUALITY_CHANGED = 100;
+  MESSAGE_TYPE_SRVR_CTRL_DEVICE_AUDIO_QUALITY_CHANGED = 101;
+  MESSAGE_TYPE_SRVR_CTRL_AUTOPLAY_MODE_SET = 102;
+  MESSAGE_TYPE_SRVR_CTRL_AUTOPLAY_TRACKS_LOADED = 103;
+  MESSAGE_TYPE_SRVR_CTRL_AUTOPLAY_TRACKS_REMOVED = 104;
+  MESSAGE_TYPE_SRVR_CTRL_QUEUE_VERSION_CHANGED = 105;
+}
+
+// Union message (no oneof to match wire leniency)
+message QConnectMessage {
+  optional int32 message_type = 1;
+  optional Error error = 2;
+  optional PlaybackError playback_error = 3;
+  optional AuthenticateMessage authenticate = 4;
+
+  // Renderer -> Server events
+  optional RndrSrvrJoinSession rndr_srvr_join_session = 21;
+  optional RndrSrvrDeviceInfoUpdated rndr_srvr_device_info_updated = 22;
+  optional RndrSrvrStateUpdated rndr_srvr_state_updated = 23;
+  optional RndrSrvrRendererAction rndr_srvr_renderer_action = 30;
+  optional RndrSrvrVolumeChanged rndr_srvr_volume_changed = 25;
+  optional RndrSrvrFileAudioQualityChanged rndr_srvr_file_audio_quality_changed = 26;
+  optional RndrSrvrDeviceAudioQualityChanged rndr_srvr_device_audio_quality_changed = 27;
+  optional RndrSrvrMaxAudioQualityChanged rndr_srvr_max_audio_quality_changed = 28;
+  optional RndrSrvrVolumeMuted rndr_srvr_volume_muted = 29;
+
+  // Server -> Renderer commands
+  optional SrvrRndrSetState srvr_rndr_set_state = 41;
+  optional SrvrRndrSetVolume srvr_rndr_set_volume = 42;
+  optional SrvrRndrSetActive srvr_rndr_set_active = 43;
+  optional SrvrRndrSetMaxAudioQuality srvr_rndr_set_max_audio_quality = 44;
+  optional SrvrRndrSetLoopMode srvr_rndr_set_loop_mode = 45;
+  optional SrvrRndrSetShuffleMode srvr_rndr_set_shuffle_mode = 46;
+  optional SrvrRndrSetAutoplayMode srvr_rndr_set_autoplay_mode = 47;
+
+  // Controller -> Server
+  optional CtrlSrvrJoinSession ctrl_srvr_join_session = 61;
+  optional CtrlSrvrSetPlayerState ctrl_srvr_set_player_state = 62;
+  optional CtrlSrvrSetActiveRenderer ctrl_srvr_set_active_renderer = 63;
+  optional CtrlSrvrSetVolume ctrl_srvr_set_volume = 64;
+  optional CtrlSrvrClearQueue ctrl_srvr_clear_queue = 65;
+  optional CtrlSrvrQueueLoadTracks ctrl_srvr_queue_load_tracks = 66;
+  optional CtrlSrvrQueueInsertTracks ctrl_srvr_queue_insert_tracks = 67;
+  optional CtrlSrvrQueueAddTracks ctrl_srvr_queue_add_tracks = 68;
+  optional CtrlSrvrQueueRemoveTracks ctrl_srvr_queue_remove_tracks = 69;
+  optional CtrlSrvrQueueReorderTracks ctrl_srvr_queue_reorder_tracks = 70;
+  optional CtrlSrvrSetShuffleMode ctrl_srvr_set_shuffle_mode = 71;
+  optional CtrlSrvrSetLoopMode ctrl_srvr_set_loop_mode = 72;
+  optional CtrlSrvrMuteVolume ctrl_srvr_mute_volume = 73;
+  optional CtrlSrvrSetMaxAudioQuality ctrl_srvr_set_max_audio_quality = 74;
+  optional CtrlSrvrSetQueueState ctrl_srvr_set_queue_state = 75;
+  optional CtrlSrvrAskForQueueState ctrl_srvr_ask_for_queue_state = 76;
+  optional CtrlSrvrAskForRendererState ctrl_srvr_ask_for_renderer_state = 77;
+  optional CtrlSrvrSetAutoplayMode ctrl_srvr_set_autoplay_mode = 78;
+  optional CtrlSrvrAutoplayLoadTracks ctrl_srvr_autoplay_load_tracks = 79;
+  optional CtrlSrvrAutoplayRemoveTracks ctrl_srvr_autoplay_remove_tracks = 80;
+
+  // Server -> Controllers
+  optional SrvrCtrlSessionState srvr_ctrl_session_state = 81;
+  optional SrvrCtrlRendererStateUpdated srvr_ctrl_renderer_state_updated = 82;
+  optional SrvrCtrlAddRenderer srvr_ctrl_add_renderer = 83;
+  optional SrvrCtrlUpdateRenderer srvr_ctrl_update_renderer = 84;
+  optional SrvrCtrlRemoveRenderer srvr_ctrl_remove_renderer = 85;
+  optional SrvrCtrlActiveRendererChanged srvr_ctrl_active_renderer_changed = 86;
+  optional SrvrCtrlVolumeChanged srvr_ctrl_volume_changed = 87;
+  optional SrvrCtrlQueueErrorMessage srvr_ctrl_queue_error_message = 88;
+  optional SrvrCtrlQueueCleared srvr_ctrl_queue_cleared = 89;
+  optional SrvrCtrlQueueState srvr_ctrl_queue_state = 90;
+  optional SrvrCtrlQueueLoadTracks srvr_ctrl_queue_tracks_loaded = 91;
+  optional SrvrCtrlQueueTracksInserted srvr_ctrl_queue_tracks_inserted = 92;
+  optional SrvrCtrlQueueTracksAdded srvr_ctrl_queue_tracks_added = 93;
+  optional SrvrCtrlQueueTracksRemoved srvr_ctrl_queue_tracks_removed = 94;
+  optional SrvrCtrlQueueTracksReordered srvr_ctrl_queue_tracks_reordered = 95;
+  optional SrvrCtrlShuffleModeSet srvr_ctrl_shuffle_mode_set = 96;
+  optional SrvrCtrlLoopModeSet srvr_ctrl_loop_mode_set = 97;
+  optional SrvrCtrlVolumeMuted srvr_ctrl_volume_muted = 98;
+  optional SrvrCtrlMaxAudioQualityChanged srvr_ctrl_max_audio_quality_changed = 99;
+  optional SrvrCtrlFileAudioQualityChanged srvr_ctrl_file_audio_quality_changed = 100;
+  optional SrvrCtrlDeviceAudioQualityChanged srvr_ctrl_device_audio_quality_changed = 101;
+  optional SrvrCtrlAutoplayModeSet srvr_ctrl_autoplay_mode_set = 102;
+  optional SrvrCtrlAutoplayTracksLoaded srvr_ctrl_autoplay_tracks_loaded = 103;
+  optional SrvrCtrlQueueTracksRemoved srvr_ctrl_autoplay_tracks_removed = 104;
+  optional SrvrCtrlQueueVersionChanged srvr_ctrl_queue_version_changed = 105;
+}
+
+// Renderer <-> Server messages
+message RndrSrvrJoinSession {
+  optional bytes session_uuid = 1;      // 16 bytes
+  optional DeviceInfo device_info = 2;
+  optional int32 reason = 3;
+  optional RendererState initial_state = 4;
+  optional bool is_active = 5;
+}
+
+message RndrSrvrDeviceInfoUpdated {
+  optional DeviceInfo device_info = 1;
+}
+
+message RndrSrvrStateUpdated {
+  optional QueueRendererState state = 1;
+}
+
+message RndrSrvrRendererAction {
+  optional int32 action = 1;
+}
+
+message RndrSrvrVolumeChanged {
+  optional uint32 volume = 1;
+}
+
+message RndrSrvrVolumeMuted {
+  optional bool value = 1;
+}
+
+message RndrSrvrFileAudioQualityChanged {
+  optional int32 value = 1;
+}
+
+message RndrSrvrDeviceAudioQualityChanged {
+  optional int32 value = 1;
+}
+
+message RndrSrvrMaxAudioQualityChanged {
+  optional int32 value = 1;
+}
+
+// Server -> Renderer commands
+message SrvrRndrSetState {
+  optional PlayingState playing_state = 1;
+  optional uint32 current_position = 2;  // ms
+  optional QueueVersion queue_version = 3;
+  optional QueueTrackRef current_queue_item = 4;
+  optional QueueTrackRef next_queue_item = 5;
+}
+
+message SrvrRndrSetVolume {
+  optional uint32 volume = 1;       // absolute
+  optional int32 volume_delta = 2;  // relative
+}
+
+message SrvrRndrSetActive {
+  optional bool active = 1;
+}
+
+message SrvrRndrSetMaxAudioQuality {
+  optional int32 max_audio_quality = 1;
+}
+
+message SrvrRndrSetLoopMode {
+  optional LoopMode mode = 1;
+}
+
+message SrvrRndrSetShuffleMode {
+  optional bool shuffle_on = 1;
+}
+
+message SrvrRndrSetAutoplayMode {
+  optional bool autoplay_on = 1;
+}
+
+// Controller -> Server (non-queue)
+message CtrlSrvrJoinSession {
+  optional bytes session_uuid = 1;  // 16 bytes
+  optional DeviceInfo device_info = 2;
+}
+
+message CtrlSrvrSetPlayerState {
+  optional PlayingState playing_state = 1;
+  optional uint32 current_position = 2;  // ms
+  optional QueueItemRef current_queue_item = 3;
+}
+
+message CtrlSrvrSetActiveRenderer {
+  optional int32 renderer_id = 1;
+}
+
+message CtrlSrvrSetVolume {
+  optional int32 renderer_id = 1;
+  optional uint32 volume = 2;       // absolute
+  optional int32 volume_delta = 3;  // relative
+}
+
+message CtrlSrvrMuteVolume {
+  optional int32 renderer_id = 1;
+  optional bool value = 2;
+}
+
+message CtrlSrvrSetShuffleMode {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  optional bool shuffle_on = 3;
+  optional fixed32 current_queue_item_id = 4;
+  optional uint32 shuffle_pivot = 5;
+  optional bool autoplay_mode = 6;
+  optional bool autoplay_loading = 7;
+  optional bytes queue_hash = 100;
+}
+
+message CtrlSrvrSetLoopMode {
+  optional LoopMode mode = 1;
+}
+
+message CtrlSrvrSetMaxAudioQuality {
+  optional int32 max_audio_quality = 1;
+}
+
+message CtrlSrvrSetQueueState {
+  // Controller-originated snapshot; rarely used
+}
+
+message CtrlSrvrAskForQueueState {
+  optional QueueVersion queue_version = 1;
+  optional bytes queue_uuid = 2;
+}
+
+message CtrlSrvrAskForRendererState {
+  optional uint64 session_id = 1;
+}
+
+message CtrlSrvrSetAutoplayMode {
+  optional bool autoplay_on = 1;
+}
+
+message CtrlSrvrAutoplayRemoveTracks {
+  // Mirror of remove
+}
+
+// Server -> Controllers (non-queue)
+message SrvrCtrlSessionState {
+  optional bytes session_uuid = 1;  // 16 bytes
+  optional uint64 session_id = 2;
+  optional QueueVersion queue_version = 3;
+  optional uint32 track_index = 4;
+  optional bool unknown = 5;
+}
+
+message SrvrCtrlRendererStateUpdated {
+  optional uint64 renderer_id = 1;
+  optional uint64 message_id = 2;
+  optional RendererState state = 3;
+}
+
+message SrvrCtrlAddRenderer {
+  optional uint64 renderer_id = 1;
+  optional DeviceInfo renderer = 2;
+}
+
+message SrvrCtrlUpdateRenderer {
+  optional DeviceInfo renderer = 1;
+}
+
+message SrvrCtrlRemoveRenderer {
+  optional uint64 renderer_id = 1;
+}
+
+message SrvrCtrlActiveRendererChanged {
+  optional uint64 renderer_id = 1;
+}
+
+message SrvrCtrlVolumeChanged {
+  optional uint64 renderer_id = 1;
+  optional uint32 volume = 2;
+}
+
+message SrvrCtrlVolumeMuted {
+  optional uint64 renderer_id = 1;
+  optional bool value = 2;
+}
+
+message SrvrCtrlQueueErrorMessage {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  optional Error error = 3;
+}
+
+message SrvrCtrlShuffleModeSet {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  optional bool shuffle_on = 3;
+  optional fixed32 current_queue_item_id = 4;
+  optional uint32 shuffle_pivot = 5;
+  optional bool autoplay_mode = 6;
+  optional bool autoplay_loading = 7;
+  optional bytes queue_hash = 100;
+}
+
+message SrvrCtrlLoopModeSet {
+  optional LoopMode mode = 1;
+}
+
+message SrvrCtrlMaxAudioQualityChanged {
+  optional int32 max_audio_quality = 1;
+}
+
+message SrvrCtrlFileAudioQualityChanged {
+  optional int32 file_audio_quality = 1;
+}
+
+message SrvrCtrlDeviceAudioQualityChanged {
+  optional int32 device_audio_quality = 1;
+}
+
+message SrvrCtrlAutoplayModeSet {
+  optional bool autoplay_on = 1;
+}
+
+message SrvrCtrlAutoplayTracksLoaded {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated QueueTrackRef tracks = 3;
+  optional bytes context_uuid = 4;
+}
+
+message SrvrCtrlQueueVersionChanged {
+  optional QueueVersion queue_version = 1;
+}

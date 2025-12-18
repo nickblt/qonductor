@@ -1,0 +1,114 @@
+syntax = "proto2";
+package qconnect;
+
+// Enums used across messages
+enum BufferState {
+  BUFFER_STATE_UNKNOWN   = 0;
+  BUFFER_STATE_BUFFERING = 1;
+  BUFFER_STATE_OK        = 2;
+  BUFFER_STATE_ERROR     = 3;
+  BUFFER_STATE_UNDERRUN  = 4;
+}
+
+enum PlayingState {
+  PLAYING_STATE_UNKNOWN  = 0;
+  PLAYING_STATE_STOPPED  = 1;
+  PLAYING_STATE_PLAYING  = 2;
+  PLAYING_STATE_PAUSED   = 3;
+}
+
+enum DeviceType {
+  DEVICE_TYPE_UNKNOWN     = 0;
+  DEVICE_TYPE_SPEAKER     = 1;
+  DEVICE_TYPE_SPEAKERBOX  = 2;
+  DEVICE_TYPE_TV          = 3;
+  DEVICE_TYPE_SPEAKERBOX2 = 4;
+  DEVICE_TYPE_LAPTOP      = 5;
+  DEVICE_TYPE_PHONE       = 6;
+  DEVICE_TYPE_GOOGLE_CAST = 7;
+  DEVICE_TYPE_HEADPHONES  = 8;
+  DEVICE_TYPE_TABLET      = 9;
+}
+
+enum LoopMode {
+  LOOP_MODE_UNKNOWN    = 0;
+  LOOP_MODE_OFF        = 1;
+  LOOP_MODE_REPEAT_ONE = 2;
+  LOOP_MODE_REPEAT_ALL = 3;
+}
+
+// Small leaf messages
+message QueueVersion {
+  optional uint64 major = 1;
+  optional int32 minor = 2;
+}
+
+message Position {
+  optional fixed64 timestamp = 1; // ms epoch
+  optional uint32 value = 2;      // ms position
+}
+
+message Error {
+  optional string code = 1;
+  optional string message = 2;
+}
+
+message AuthenticateMessage {
+  optional string token = 1;
+}
+
+message PlaybackError {
+  optional QueueVersion queue_version = 1;
+  optional int32 queue_item_id = 2;
+  optional int32 error_type = 3;
+}
+
+// Device / renderer
+message DeviceCapabilities {
+  optional int32 min_audio_quality = 1;
+  optional int32 max_audio_quality = 2;
+  optional int32 volume_remote_control = 3;
+}
+
+message DeviceInfo {
+  optional bytes device_uuid = 1;     // 16 bytes
+  optional string friendly_name = 2;
+  optional string brand = 3;
+  optional string model = 4;
+  optional string serial_number = 5;
+  optional DeviceType type = 6;
+  optional DeviceCapabilities capabilities = 7;
+  optional string software_version = 8;
+}
+
+message RendererState {
+  optional PlayingState playing_state = 1;
+  optional BufferState buffer_state = 2;
+  optional Position current_position = 3;
+  optional uint32 duration = 4;           // ms
+  optional uint32 current_queue_index = 5;
+  optional int32 next_queue_item_id = 7;
+}
+
+message QueueRendererState {
+  optional PlayingState playing_state = 1;
+  optional BufferState buffer_state = 2;
+  optional Position current_position = 3;
+  optional uint32 duration = 4;               // ms
+  optional QueueVersion queue_version = 5;
+  optional int32 current_queue_item_id = 6;
+  optional int32 next_queue_item_id = 7;
+}
+
+// Queue item references
+message QueueItemRef {
+  optional QueueVersion queue_version = 1;
+  optional uint32 id = 2;
+}
+
+// Track with context (snapshots/autoplay)
+message QueueTrackRef {
+  optional uint64 queue_item_id = 1;
+  optional fixed32 track_id = 2;
+  optional bytes context_uuid = 3;  // 16 bytes
+}

@@ -1,0 +1,67 @@
+syntax = "proto2";
+package ws;
+
+// WebSocket-level messages
+
+message WsWelcome {
+  optional uint64 ws_request_id = 1;
+  optional uint64 timestamp = 2;
+  optional bytes jwt = 3;
+}
+
+message WsInfo {
+  optional uint64 ws_request_id = 1;
+  optional uint64 timestamp = 2;
+  optional bool unknown1 = 3;
+  optional bytes unknown2 = 5;
+  optional WsData ws_data = 7;
+}
+
+message WsData {
+  optional fixed64 device_id = 1;
+  optional uint64 message_id = 2;
+  optional Info info = 3;
+
+  message Info {
+    enum Kind {
+      KIND_UNKNOWN = 0;
+      KIND_PLAY = 29;
+      KIND_DEVICE = 61;
+      KIND_PLAYING = 63;
+      KIND_STATUS = 77;
+    }
+
+    optional uint32 kind = 1;
+
+    oneof data {
+      EmptyMessage play_block = 29;
+      ClientBlock device_block = 61;
+      StatusBlock playing_for = 63;
+      StatusBlock active_for = 77;
+    }
+  }
+}
+
+message EmptyMessage {}
+
+message StatusBlock {
+  optional uint64 timestamp_ms = 1;
+}
+
+message ClientBlock {
+  optional WsDeviceInfo details = 2;
+}
+
+message WsDeviceInfo {
+  optional bytes opaque_id = 1;       // 16 bytes
+  optional string name = 2;
+  optional uint32 platform = 6;
+  optional Capabilities caps = 7;
+  optional string app_version = 8;
+}
+
+message Capabilities {
+  optional uint32 a = 1;
+  optional uint32 b = 2;
+  optional uint32 c = 3;
+}

@@ -1,0 +1,63 @@
+syntax = "proto2";
+package qconnect;
+
+// WebSocket envelope layer.
+// Multiplexes different protocols and carries raw payload.
+// When proto == QP_QCONNECT (1), payload is a serialized QConnectBatch.
+
+enum QCloudMessageType {
+  QCLOUD_MESSAGE_TYPE_UNSPECIFIED = 0;
+  AUTHENTICATE = 1;
+  SUBSCRIBE = 2;
+  UNSUBSCRIBE = 3;
+  PAYLOAD = 6;
+  ERROR = 9;
+  DISCONNECT = 10;
+}
+
+enum QCloudProto {
+  QP_UNKNOWN = 0;
+  QP_QCONNECT = 1;
+  QP_QCONNECT2 = 2;
+  QP_QCONNECT3 = 3;
+}
+
+message Authenticate {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;  // ms epoch
+  optional string jwt = 3;
+}
+
+message Subscribe {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;
+  optional uint32 proto = 3;      // QCloudProto
+  repeated bytes channels = 4;    // channel ids
+}
+
+message Unsubscribe {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;
+  optional uint32 proto = 3;      // QCloudProto
+  repeated bytes channels = 4;
+}
+
+message Payload {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;
+
+  // Optional routing
+  optional uint32 proto = 3;      // QCloudProto
+  optional bytes src = 4;         // channel id
+  repeated bytes dests = 5;       // channel ids
+
+  // Raw bytes for the selected protocol.
+  // If proto == QP_QCONNECT (1), interpret as QConnectBatch.
+  optional bytes payload = 7;
+}
+
+message Disconnect {
+  optional uint32 msg_id = 1;
+  optional uint64 msg_date = 2;
+  optional bool reconnect = 3;
+}

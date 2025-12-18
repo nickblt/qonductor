@@ -1,0 +1,161 @@
+syntax = "proto2";
+package qconnect;
+
+import "qconnect_common.proto";
+
+// Server -> Controllers: full state & deltas
+
+// Full snapshot
+message SrvrCtrlQueueState {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;         // 16 bytes
+  repeated QueueTrackRef tracks = 3;
+  optional bool shuffle_mode = 4;
+  repeated uint32 shuffled_track_indexes = 5;
+  optional bool autoplay_mode = 6;
+  optional bool autoplay_loading = 7;
+  repeated QueueTrackRef autoplay_tracks = 8;
+  optional bytes queue_hash = 100;
+}
+
+// Insert after a given item
+message SrvrCtrlQueueTracksInserted {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated QueueTrackRef tracks = 3;
+  optional int32 insert_after = 4;
+  optional fixed32 shuffle_seed = 5;
+  optional bytes context_uuid = 6;
+  optional bool autoplay_reset = 7;
+  optional bool autoplay_loading = 8;
+  optional bytes queue_hash = 100;
+}
+
+// Add (usually append)
+message SrvrCtrlQueueTracksAdded {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated QueueTrackRef tracks = 3;
+  optional fixed32 shuffle_seed = 4;
+  optional bytes context_uuid = 5;
+  optional bool autoplay_reset = 6;
+  optional bool autoplay_loading = 7;
+  optional bytes queue_hash = 100;
+}
+
+// Remove by ids
+message SrvrCtrlQueueTracksRemoved {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated uint32 queue_item_ids = 3;
+  optional bool autoplay_reset = 4;
+  optional bool autoplay_loading = 5;
+  optional bytes queue_hash = 100;
+}
+
+// Reorder selected ids after anchor
+message SrvrCtrlQueueTracksReordered {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated uint32 queue_item_ids = 3;
+  optional uint32 insert_after = 4;
+  optional bool autoplay_reset = 5;
+  optional bool autoplay_loading = 6;
+  optional bytes queue_hash = 100;
+}
+
+// Cleared
+message SrvrCtrlQueueCleared {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+}
+
+// Controller -> Server queue commands
+
+message CtrlSrvrClearQueue {
+  optional QueueVersion queue_version = 1;
+}
+
+message CtrlSrvrQueueLoadTracks {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  optional bytes session_uuid = 3;            // 16 bytes
+  optional uint32 queue_position = 4;
+  optional fixed32 qobuz_reference_uuid = 5;
+  optional int32 shuffle_pivot_queue_item_id = 6;
+  optional bool shuffle_mode = 7;
+  optional bytes context_uuid = 8;
+  optional bool autoplay_reset = 9;
+  optional bool autoplay_loading = 10;
+  optional bytes queue_hash = 100;
+}
+
+message SrvrCtrlQueueLoadTracks {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated QueueTrackRef tracks = 3;
+  optional uint32 queue_position = 4;
+  optional fixed32 qobuz_reference_uuid = 5;
+  optional int32 shuffle_pivot_queue_item_id = 6;
+  optional bool shuffle_mode = 7;
+  optional bytes context_uuid = 8;
+  optional bool autoplay_reset = 9;
+  optional bool autoplay_loading = 10;
+  optional bytes queue_hash = 100;
+}
+
+message CtrlSrvrQueueInsertTracks {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated QueueTrackRef tracks = 3;
+  optional int32 insert_after = 4;
+  optional fixed32 shuffle_seed = 5;
+  optional bytes context_uuid = 6;
+  optional bool autoplay_reset = 7;
+  optional bool autoplay_loading = 8;
+  optional bytes queue_hash = 100;
+}
+
+message CtrlSrvrQueueAddTracks {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated QueueTrackRef tracks = 3;
+  optional fixed32 shuffle_seed = 4;
+  optional bytes context_uuid = 5;
+  optional bool autoplay_reset = 6;
+  optional bool autoplay_loading = 7;
+  optional bytes queue_hash = 100;
+}
+
+message CtrlSrvrQueueRemoveTracks {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated int32 queue_item_ids = 3;
+  optional bool autoplay_reset = 4;
+  optional bool autoplay_loading = 5;
+  optional bytes queue_hash = 100;
+}
+
+message CtrlSrvrQueueReorderTracks {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated int32 queue_item_ids = 3;
+  optional int32 insert_after = 4;
+  optional bool autoplay_reset = 5;
+  optional bool autoplay_loading = 6;
+  optional bytes queue_hash = 100;
+}
+
+message CtrlSrvrAutoplayLoadTracks {
+  optional QueueVersion queue_version = 1;
+  optional bytes action_uuid = 2;
+  repeated fixed32 track_ids = 3;
+  optional bytes context_uuid = 4;
+  optional bool autoplay_loading = 5;
+  optional bool autoplay_reset = 6;
+  optional uint32 shuffle_seed = 7;
+  optional uint32 insert_after = 8;
+  optional bool prepend = 9;
+  optional bool append = 10;
+  optional bytes queue_hash = 100;
+}
