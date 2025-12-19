@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, interval};
 use tracing::{debug, info, warn};
 
-use crate::discovery::{AudioQuality, DeviceConfig, SessionInfo};
+use crate::config::{DeviceConfig, SessionInfo};
 use crate::proto::qconnect::{
     BufferState, CtrlSrvrAskForQueueState, CtrlSrvrAskForRendererState,
     CtrlSrvrSetActiveRenderer, LoopMode, PlayingState, Position, QConnectMessage,
@@ -72,8 +72,9 @@ pub struct ActivationState {
     pub muted: bool,
     /// Current volume (0-100).
     pub volume: u32,
-    /// Maximum audio quality this renderer supports.
-    pub max_quality: AudioQuality,
+    /// Maximum audio quality capability level (1-4).
+    /// 1 = MP3, 2 = FLAC Lossless, 3 = HiRes 96kHz, 4 = HiRes 192kHz
+    pub max_quality: i32,
     /// Current playback state.
     pub playback: PlaybackResponse,
 }
@@ -198,10 +199,10 @@ pub enum RendererBroadcast {
     /// Volume muted broadcast.
     VolumeMutedBroadcast { renderer_id: u64, muted: bool },
 
-    /// Max audio quality changed broadcast.
+    /// Max audio quality changed broadcast (capability level).
     MaxAudioQualityBroadcast {
         renderer_id: u64,
-        quality: AudioQuality,
+        quality: i32,
     },
 
     /// File audio quality changed broadcast.
@@ -498,23 +499,27 @@ impl SessionRunner {
     }
 
     /// Report volume muted state to server.
+    /// Protocol uses None for not muted, Some(true) for muted.
     async fn do_report_volume_muted(&mut self, muted: bool) -> Result<()> {
         let msg = QConnectMessage {
             message_type: Some(QConnectMessageType::MessageTypeRndrSrvrVolumeMuted as i32),
-            rndr_srvr_volume_muted: Some(RndrSrvrVolumeMuted { value: Some(muted) }),
+            rndr_srvr_volume_muted: Some(RndrSrvrVolumeMuted {
+                value: if muted { Some(true) } else { None },
+            }),
             ..Default::default()
         };
         self.writer.send(msg).await
     }
 
     /// Report max audio quality capability to server.
-    async fn do_report_max_audio_quality(&mut self, quality: AudioQuality) -> Result<()> {
+    /// Uses capability level (1-4), not format IDs.
+    async fn do_report_max_audio_quality(&mut self, quality: i32) -> Result<()> {
         let msg = QConnectMessage {
             message_type: Some(
                 QConnectMessageType::MessageTypeRndrSrvrMaxAudioQualityChanged as i32,
             ),
             rndr_srvr_max_audio_quality_changed: Some(RndrSrvrMaxAudioQualityChanged {
-                value: Some(quality.into()),
+                value: Some(quality),
             }),
             ..Default::default()
         };
@@ -892,10 +897,7 @@ impl SessionRunner {
             // SrvrCtrlMaxAudioQualityChanged (99) - Broadcast
             t if t == QConnectMessageType::MessageTypeSrvrCtrlMaxAudioQualityChanged as i32 => {
                 if let Some(mq) = msg.srvr_ctrl_max_audio_quality_changed {
-                    let quality = mq
-                        .max_audio_quality
-                        .map(AudioQuality::from)
-                        .unwrap_or_default();
+                    let quality = mq.max_audio_quality.unwrap_or(0);
 
                     // This broadcast doesn't include renderer_id; applies to active renderer
                     let _ = self

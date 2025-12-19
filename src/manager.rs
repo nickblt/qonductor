@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::discovery::{DeviceConfig, DeviceRegistry, DeviceSelected};
+use crate::config::DeviceConfig;
+use crate::discovery::{DeviceRegistry, DeviceSelected};
 use crate::qconnect::{RendererBroadcast, RendererHandler, SessionHandle, SharedHandler};
 use crate::{Error, Result};
 

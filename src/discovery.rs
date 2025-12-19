@@ -21,6 +21,7 @@ use uuid::Uuid;
 use zeroconf_tokio::prelude::*;
 use zeroconf_tokio::{MdnsService, MdnsServiceAsync, ServiceType, TxtRecord};
 
+use crate::config::{DeviceConfig, SessionInfo};
 use crate::proto::qconnect::DeviceType;
 use crate::{Error, Result};
 
@@ -51,135 +52,15 @@ impl DeviceTypeExt for DeviceType {
     }
 }
 
-/// Audio quality level for device capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AudioQuality {
-    Mp3 = 5,
-    FlacLossless = 6,
-    FlacHiRes96 = 7,
-    #[default]
-    FlacHiRes192 = 27,
-}
-
-impl AudioQuality {
-    /// Returns the string representation for JSON responses.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AudioQuality::Mp3 => "MP3",
-            AudioQuality::FlacLossless => "LOSSLESS",
-            AudioQuality::FlacHiRes96 => "HIRES_L2",
-            AudioQuality::FlacHiRes192 => "HIRES_L3",
-        }
+/// Convert audio quality capability level to display string for HTTP responses.
+fn audio_quality_display(level: i32) -> &'static str {
+    match level {
+        1 => "MP3",
+        2 => "LOSSLESS",
+        3 => "HIRES_L2",
+        4 => "HIRES_L3",
+        _ => "HIRES_L3",
     }
-}
-
-impl From<i32> for AudioQuality {
-    fn from(value: i32) -> Self {
-        match value {
-            5 => AudioQuality::Mp3,
-            6 => AudioQuality::FlacLossless,
-            7 => AudioQuality::FlacHiRes96,
-            27 => AudioQuality::FlacHiRes192,
-            _ => AudioQuality::FlacHiRes192, // Default to highest quality
-        }
-    }
-}
-
-impl From<AudioQuality> for i32 {
-    fn from(value: AudioQuality) -> Self {
-        value as i32
-    }
-}
-
-/// Configuration for a Qobuz Connect device.
-#[derive(Debug, Clone)]
-pub struct DeviceConfig {
-    /// 16-byte unique device identifier.
-    pub device_uuid: [u8; 16],
-    /// Human-readable device name.
-    pub friendly_name: String,
-    /// Device type.
-    pub device_type: DeviceType,
-    /// Brand name for display.
-    pub brand: String,
-    /// Model name for display.
-    pub model: String,
-    /// Maximum audio quality supported.
-    pub max_audio_quality: AudioQuality,
-    /// Qobuz app_id (required for get-connect-info).
-    pub app_id: String,
-}
-
-impl DeviceConfig {
-    /// Create a new device configuration with a deterministic UUID based on the device name.
-    ///
-    /// This ensures the same device name always gets the same UUID, so the server
-    /// recognizes it as the same device across restarts.
-    pub fn new(friendly_name: impl Into<String>, app_id: impl Into<String>) -> Self {
-        let name = friendly_name.into();
-        // Generate deterministic UUID from device name using MD5
-        use md5::{Digest, Md5};
-        let mut hasher = Md5::new();
-        hasher.update(format!("qonductor:{}", name).as_bytes());
-        let uuid: [u8; 16] = hasher.finalize().into();
-
-        Self {
-            device_uuid: uuid,
-            friendly_name: name,
-            device_type: DeviceType::Speaker,
-            brand: "Qonductor".to_string(),
-            model: "Qonductor Rust".to_string(),
-            max_audio_quality: AudioQuality::FlacHiRes192,
-            app_id: app_id.into(),
-        }
-    }
-
-    /// Create a new device configuration with a specific UUID.
-    pub fn with_uuid(
-        device_uuid: [u8; 16],
-        friendly_name: impl Into<String>,
-        app_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            device_uuid,
-            friendly_name: friendly_name.into(),
-            device_type: DeviceType::Speaker,
-            brand: "Qonductor".to_string(),
-            model: "Qonductor Rust".to_string(),
-            max_audio_quality: AudioQuality::FlacHiRes192,
-            app_id: app_id.into(),
-        }
-    }
-
-    /// Returns the device UUID as a hex string (no dashes).
-    pub fn uuid_hex(&self) -> String {
-        Uuid::from_bytes(self.device_uuid).simple().to_string()
-    }
-
-    /// Returns the device UUID as a standard UUID string (8-4-4-4-12 format).
-    pub fn uuid_formatted(&self) -> String {
-        Uuid::from_bytes(self.device_uuid).hyphenated().to_string()
-    }
-}
-
-/// Session information received from a Qobuz controller.
-#[derive(Debug, Clone)]
-pub(crate) struct SessionInfo {
-    /// Session UUID.
-    pub session_id: String,
-    /// WebSocket endpoint URL.
-    pub ws_endpoint: String,
-    /// JWT token for WebSocket authentication.
-    pub ws_jwt: String,
-    /// JWT expiration timestamp (for future refresh logic).
-    #[allow(dead_code)]
-    pub ws_jwt_exp: u64,
-    /// JWT token for API authentication (for streaming URLs).
-    #[allow(dead_code)]
-    pub api_jwt: String,
-    /// API JWT expiration timestamp.
-    #[allow(dead_code)]
-    pub api_jwt_exp: u64,
 }
 
 /// Event emitted when a device is selected in the Qobuz app.
@@ -282,7 +163,7 @@ async fn get_display_info(
         model_display_name: device.config.model.clone(),
         brand_display_name: device.config.brand.clone(),
         serial_number: device.config.uuid_formatted(),
-        max_audio_quality: device.config.max_audio_quality.as_str().to_string(),
+        max_audio_quality: audio_quality_display(device.config.max_audio_quality).to_string(),
     }))
 }
 

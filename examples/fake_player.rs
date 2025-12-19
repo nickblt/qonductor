@@ -7,9 +7,8 @@
 //! Run with debug: RUST_LOG=qonductor=debug,fake_player=debug cargo run --example fake_player
 
 use qonductor::{
-    ActivationState, AudioQuality, BufferState, DeviceConfig, LoopMode, PlaybackCommand,
-    PlaybackResponse, PlayingState, QueueTrack, RendererBroadcast, RendererHandler,
-    SessionManager,
+    ActivationState, BufferState, DeviceConfig, LoopMode, PlaybackCommand, PlaybackResponse,
+    PlayingState, QueueTrack, RendererBroadcast, RendererHandler, SessionManager,
 };
 use rand::{Rng, thread_rng};
 use serde::Deserialize;
@@ -234,7 +233,7 @@ impl RendererHandler for FakePlayer {
         ActivationState {
             muted: self.muted,
             volume: self.volume,
-            max_quality: AudioQuality::FlacHiRes192,
+            max_quality: 4, // HiRes 192kHz capability level
             playback: self.playback_response(),
         }
     }

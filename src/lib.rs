@@ -26,6 +26,7 @@
 //! }
 //! ```
 
+pub mod config;
 pub mod credentials;
 pub mod error;
 pub mod manager;
@@ -43,7 +44,8 @@ pub use qconnect::{
     RendererHandler,
 };
 pub use proto::qconnect::{BufferState, DeviceType, LoopMode, PlayingState};
-pub use discovery::{AudioQuality, DeviceConfig, DeviceTypeExt};
+pub use config::{audio_quality, DeviceConfig};
+pub use discovery::DeviceTypeExt;
 pub use transport::format_qconnect_message;
 
 pub use error::Error;
