@@ -1,59 +1,62 @@
-//! Fake player example - simulates a Qobuz Connect player.
+//! Fake player example.
 //!
-//! This example registers as a device, takes over as active renderer,
-//! and simulates playback - giving feedback to the server so the iOS app
-//! sees it as a real speaker playing music.
+//! Simulates a Qobuz Connect player using the RendererHandler trait.
+//! The library automatically handles protocol responses.
 //!
 //! Run with: RUST_LOG=info cargo run --example fake_player
 //! Run with debug: RUST_LOG=qonductor=debug,fake_player=debug cargo run --example fake_player
 
-use qonductor::{AudioQuality, DeviceConfig, LoopMode, PlayState, QueueTrack, SessionEvent, SessionManager};
-use rand::Rng;
+use qonductor::{
+    ActivationState, AudioQuality, BufferState, DeviceConfig, LoopMode, PlayState,
+    PlaybackCommand, PlaybackResponse, QueueTrack, RendererBroadcast, RendererHandler,
+    SessionManager,
+};
+use rand::{Rng, thread_rng};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::time::Duration;
 use tokio::signal;
-use tokio::time::{interval, Interval};
 use tracing::{debug, info, warn};
-use tracing_subscriber::EnvFilter;
-use uuid::Uuid;
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+#[derive(Deserialize)]
+struct Config {
+    app_id: String,
+}
+
+fn load_config() -> Config {
+    let config_str = fs::read_to_string("credentials.toml").expect("Failed to read credentials.toml");
+    toml::from_str(&config_str).expect("Failed to parse credentials.toml")
+}
 
 // ============================================================================
 // Track Duration Provider
 // ============================================================================
 
-/// Trait for getting track durations.
-///
-/// This allows swapping in different duration sources:
-/// - RandomDurationProvider for testing (current implementation)
-/// - API-based provider that fetches real durations from Qobuz
-trait TrackDurationProvider: Send + Sync {
-    /// Get the duration for a track in milliseconds.
-    fn get_duration_ms(&self, track_id: u64) -> u32;
+trait TrackDurationProvider: Send {
+    fn get_duration(&mut self, track_id: u64) -> u32;
 }
 
-/// Provides random track durations between 30 seconds and 5 minutes.
 struct RandomDurationProvider {
-    /// Cache of track_id -> duration_ms to keep consistent durations per track.
-    cache: std::sync::Mutex<HashMap<u64, u32>>,
+    cache: HashMap<u64, u32>,
 }
 
 impl RandomDurationProvider {
     fn new() -> Self {
         Self {
-            cache: std::sync::Mutex::new(HashMap::new()),
+            cache: HashMap::new(),
         }
     }
 }
 
 impl TrackDurationProvider for RandomDurationProvider {
-    fn get_duration_ms(&self, track_id: u64) -> u32 {
-        let mut cache = self.cache.lock().unwrap();
-        *cache.entry(track_id).or_insert_with(|| {
-            // Random duration between 30 seconds and 5 minutes
-            let mut rng = rand::thread_rng();
-            rng.gen_range(30_000..300_000)
+    fn get_duration(&mut self, track_id: u64) -> u32 {
+        *self.cache.entry(track_id).or_insert_with(|| {
+            let mut rng = thread_rng();
+            rng.gen_range(60_000..360_000) // 1-6 minutes
         })
     }
 }
@@ -71,16 +74,12 @@ struct FakePlayer {
 
     // Queue
     queue: Vec<QueueTrack>,
-    queue_version: (u64, i32),
 
     // Settings
     loop_mode: LoopMode,
     shuffle_enabled: bool,
     volume: u32,
     muted: bool,
-
-    // Config
-    update_interval: Duration,
 
     // Identity
     renderer_id: u64,
@@ -90,235 +89,207 @@ struct FakePlayer {
 }
 
 impl FakePlayer {
-    /// Create a new fake player with configurable update interval.
-    fn new(update_interval: Duration) -> Self {
+    fn new() -> Self {
         Self {
             state: PlayState::Stopped,
             position_ms: 0,
             current_track_index: None,
             queue: Vec::new(),
-            queue_version: (0, 0),
             loop_mode: LoopMode::Off,
             shuffle_enabled: false,
             volume: 100,
             muted: false,
-            update_interval,
             renderer_id: 0,
             duration_provider: Box::new(RandomDurationProvider::new()),
         }
     }
 
-    /// Get the current track being played, if any.
     fn current_track(&self) -> Option<&QueueTrack> {
-        self.current_track_index
-            .and_then(|idx| self.queue.get(idx))
+        self.current_track_index.and_then(|i| self.queue.get(i))
     }
 
-    /// Get the current queue item ID for reporting state.
     fn current_queue_item_id(&self) -> Option<i32> {
         self.current_track().map(|t| t.queue_item_id as i32)
     }
 
-    /// Get the duration of the current track in milliseconds.
-    fn current_track_duration_ms(&self) -> Option<u32> {
-        self.current_track()
-            .map(|t| self.duration_provider.get_duration_ms(t.track_id))
+    fn current_duration(&mut self) -> Option<u32> {
+        let track_id = self.current_track()?.track_id;
+        Some(self.duration_provider.get_duration(track_id))
     }
 
-    /// Handle a playback command from the server.
-    fn handle_playback_command(&mut self, state: PlayState, position_ms: Option<u32>) {
-        let old_state = self.state;
-        self.state = state;
+    fn next_queue_item_id(&self) -> Option<i32> {
+        let current_idx = self.current_track_index?;
+        let next_idx = current_idx + 1;
+        self.queue.get(next_idx).map(|t| t.queue_item_id as i32)
+    }
 
-        if let Some(pos) = position_ms {
-            self.position_ms = pos;
-        }
-
-        // If we're starting playback and have no current track, start from beginning
-        if state == PlayState::Playing && self.current_track_index.is_none() && !self.queue.is_empty()
-        {
-            self.current_track_index = Some(0);
-            self.position_ms = position_ms.unwrap_or(0);
-        }
-
-        info!(
-            "Playback: {:?} -> {:?} at {}ms (track index: {:?})",
-            old_state, state, self.position_ms, self.current_track_index
-        );
-
-        if let Some(track) = self.current_track() {
-            let duration_ms = self.duration_provider.get_duration_ms(track.track_id);
-            info!(
-                "  Current track: id={} queue_item={} duration={}s",
-                track.track_id,
-                track.queue_item_id,
-                duration_ms / 1000
-            );
+    fn playback_response(&mut self) -> PlaybackResponse {
+        PlaybackResponse {
+            state: self.state,
+            buffer_state: BufferState::Ready,
+            position_ms: self.position_ms,
+            duration_ms: self.current_duration(),
+            queue_item_id: self.current_queue_item_id(),
+            next_queue_item_id: self.next_queue_item_id(),
         }
     }
 
-    /// Handle a queue update from the server.
-    fn handle_queue_update(&mut self, tracks: Vec<QueueTrack>, version: (u64, i32)) {
-        info!(
-            "Queue updated: {} tracks (version {}.{})",
-            tracks.len(),
-            version.0,
-            version.1
-        );
-
-        for (i, track) in tracks.iter().enumerate() {
-            let duration_ms = self.duration_provider.get_duration_ms(track.track_id);
-            debug!(
-                "  [{}] track_id={} queue_item={} duration={}s",
-                i,
-                track.track_id,
-                track.queue_item_id,
-                duration_ms / 1000
-            );
-        }
-
-        // If we had a current track, try to find it in the new queue
-        if let Some(current) = self.current_track() {
-            let current_queue_item_id = current.queue_item_id;
-            self.current_track_index = tracks
-                .iter()
-                .position(|t| t.queue_item_id == current_queue_item_id);
-
-            if self.current_track_index.is_none() {
-                info!("  Current track no longer in queue, will stop");
-                self.state = PlayState::Stopped;
-                self.position_ms = 0;
-            }
-        }
-
-        self.queue = tracks;
-        self.queue_version = version;
-    }
-
-    /// Handle volume command from the server.
-    fn handle_volume_command(&mut self, volume: u32) {
-        info!("Volume: {} -> {}", self.volume, volume);
-        self.volume = volume;
-    }
-
-    /// Handle loop mode change.
-    fn handle_loop_mode_change(&mut self, mode: LoopMode) {
-        info!("Loop mode: {:?} -> {:?}", self.loop_mode, mode);
-        self.loop_mode = mode;
-    }
-
-    /// Handle shuffle mode change.
-    fn handle_shuffle_mode_change(&mut self, enabled: bool) {
-        info!("Shuffle: {} -> {}", self.shuffle_enabled, enabled);
-        self.shuffle_enabled = enabled;
-    }
-
-    /// Advance playback position by the update interval.
-    /// Returns true if state report should be sent.
+    /// Advance position (called by heartbeat). Returns true if state changed.
     fn tick(&mut self) -> bool {
         if self.state != PlayState::Playing {
             return false;
         }
 
-        let interval_ms = self.update_interval.as_millis() as u32;
-        self.position_ms += interval_ms;
+        // Advance position by ~10 seconds
+        self.position_ms += 10_000;
 
-        // Check if track has ended
-        if let Some(duration_ms) = self.current_track_duration_ms()
-            && self.position_ms >= duration_ms
-        {
-            info!(
-                "Track ended at {}ms (duration was {}ms)",
-                self.position_ms, duration_ms
-            );
-            self.advance_track();
+        // Check if track ended
+        if let Some(duration) = self.current_duration() {
+            if self.position_ms >= duration {
+                return self.advance_track();
+            }
         }
 
-        // Report position update
-        if let Some(track) = self.current_track() {
-            debug!(
-                "Position: {}ms / {}ms (track {})",
-                self.position_ms,
-                self.duration_provider.get_duration_ms(track.track_id),
-                track.track_id
+        true // State changed (position advanced)
+    }
+
+    fn advance_track(&mut self) -> bool {
+        let queue_len = self.queue.len();
+        if queue_len == 0 {
+            self.state = PlayState::Stopped;
+            self.position_ms = 0;
+            return true;
+        }
+
+        let current = self.current_track_index.unwrap_or(0);
+        let next = match self.loop_mode {
+            LoopMode::One => current,
+            LoopMode::All => (current + 1) % queue_len,
+            LoopMode::Off => {
+                if current + 1 >= queue_len {
+                    self.state = PlayState::Stopped;
+                    self.position_ms = 0;
+                    return true;
+                }
+                current + 1
+            }
+        };
+
+        self.current_track_index = Some(next);
+        self.position_ms = 0;
+
+        if let Some(track) = self.queue.get(next) {
+            info!(
+                track_id = track.track_id,
+                queue_item_id = track.queue_item_id,
+                "Playing next track"
             );
         }
 
         true
     }
 
-    /// Advance to the next track.
-    fn advance_track(&mut self) {
-        let current_idx = self.current_track_index.unwrap_or(0);
-        let queue_len = self.queue.len();
+    fn find_track_index(&self, queue_item_id: i32) -> Option<usize> {
+        self.queue
+            .iter()
+            .position(|t| t.queue_item_id == queue_item_id as u64)
+    }
+}
 
-        if queue_len == 0 {
-            info!("Queue empty, stopping");
-            self.state = PlayState::Stopped;
-            self.position_ms = 0;
-            self.current_track_index = None;
-            return;
+impl RendererHandler for FakePlayer {
+    fn on_playback_command(&mut self, _renderer_id: u64, cmd: PlaybackCommand) -> PlaybackResponse {
+        info!(?cmd.state, ?cmd.position_ms, ?cmd.queue_item_id, "Playback command received");
+
+        self.state = cmd.state;
+        if let Some(pos) = cmd.position_ms {
+            self.position_ms = pos;
         }
 
-        match self.loop_mode {
-            LoopMode::One => {
-                // Repeat current track
-                info!("Repeating track (loop mode: One)");
-                self.position_ms = 0;
+        // If server specified a queue item, switch to it
+        if let Some(queue_item_id) = cmd.queue_item_id {
+            if let Some(idx) = self.find_track_index(queue_item_id as i32) {
+                self.current_track_index = Some(idx);
             }
-            LoopMode::All => {
-                // Move to next, wrap around
-                let next_idx = (current_idx + 1) % queue_len;
-                info!(
-                    "Advancing track: {} -> {} (loop mode: All, {} tracks)",
-                    current_idx, next_idx, queue_len
-                );
-                self.current_track_index = Some(next_idx);
-                self.position_ms = 0;
+        }
 
-                if let Some(track) = self.current_track() {
-                    let duration_ms = self.duration_provider.get_duration_ms(track.track_id);
-                    info!(
-                        "  Now playing: track_id={} queue_item={} duration={}s",
-                        track.track_id,
-                        track.queue_item_id,
-                        duration_ms / 1000
-                    );
-                }
-            }
-            LoopMode::Off => {
-                // Move to next, stop at end
-                let next_idx = current_idx + 1;
-                if next_idx >= queue_len {
-                    info!("Reached end of queue, stopping");
-                    self.state = PlayState::Stopped;
-                    self.position_ms = 0;
-                    // Keep current_track_index at last track
-                } else {
-                    info!(
-                        "Advancing track: {} -> {} ({} tracks)",
-                        current_idx, next_idx, queue_len
-                    );
-                    self.current_track_index = Some(next_idx);
-                    self.position_ms = 0;
+        // Start playing first track if we have a queue and not already on a track
+        if self.state == PlayState::Playing && self.current_track_index.is_none() && !self.queue.is_empty() {
+            self.current_track_index = Some(0);
+            self.position_ms = 0;
+        }
 
-                    if let Some(track) = self.current_track() {
-                        let duration_ms = self.duration_provider.get_duration_ms(track.track_id);
-                        info!(
-                            "  Now playing: track_id={} queue_item={} duration={}s",
-                            track.track_id,
-                            track.queue_item_id,
-                            duration_ms / 1000
-                        );
-                    }
-                }
-            }
+        self.playback_response()
+    }
+
+    fn on_volume_command(&mut self, _renderer_id: u64, volume: u32) -> u32 {
+        info!(volume, "Volume command received");
+        self.volume = volume;
+        volume
+    }
+
+    fn on_activate(&mut self, renderer_id: u64) -> ActivationState {
+        info!(renderer_id, "Device activated");
+        self.renderer_id = renderer_id;
+
+        ActivationState {
+            muted: self.muted,
+            volume: self.volume,
+            max_quality: AudioQuality::FlacHiRes192,
+            playback: self.playback_response(),
         }
     }
 
-    /// Create a tick interval for playback updates.
-    fn create_tick_interval(&self) -> Interval {
-        interval(self.update_interval)
+    fn on_deactivate(&mut self, renderer_id: u64) {
+        warn!(renderer_id, "Device deactivated");
+        self.renderer_id = 0;
+        self.state = PlayState::Stopped;
+    }
+
+    fn on_queue_update(&mut self, tracks: Vec<QueueTrack>, version: (u64, i32)) {
+        info!(
+            track_count = tracks.len(),
+            version = ?version,
+            "Queue updated"
+        );
+
+        // Remember current track ID if playing
+        let current_id = self.current_queue_item_id();
+
+        self.queue = tracks;
+        // Note: queue_version is tracked by the library, not us
+
+        // Try to find the same track in the new queue
+        if let Some(id) = current_id {
+            self.current_track_index = self.find_track_index(id);
+            if self.current_track_index.is_none() {
+                // Track was removed, stop playback
+                self.state = PlayState::Stopped;
+                self.position_ms = 0;
+            }
+        }
+        // Don't auto-select track 0 - wait for server to tell us which track via SetState
+    }
+
+    fn on_loop_mode(&mut self, mode: LoopMode) {
+        info!(?mode, "Loop mode changed");
+        self.loop_mode = mode;
+    }
+
+    fn on_shuffle_mode(&mut self, enabled: bool) {
+        info!(enabled, "Shuffle mode changed");
+        self.shuffle_enabled = enabled;
+    }
+
+    fn on_heartbeat(&mut self, _renderer_id: u64) -> Option<PlaybackResponse> {
+        if self.tick() && self.state == PlayState::Playing {
+            debug!(
+                position_ms = self.position_ms,
+                "Heartbeat"
+            );
+            Some(self.playback_response())
+        } else {
+            None
+        }
     }
 }
 
@@ -326,269 +297,82 @@ impl FakePlayer {
 // Main
 // ============================================================================
 
-#[derive(Deserialize)]
-struct Credentials {
-    app_id: String,
-    #[allow(dead_code)]
-    app_secret: String,
-}
-
 #[tokio::main]
-async fn main() {
-    // Initialize tracing
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    println!("=== Qonductor Fake Player ===");
-    println!();
+    let config = load_config();
 
-    // Load credentials
-    println!("Loading credentials from credentials.toml...");
-    let contents = match fs::read_to_string("credentials.toml") {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to read credentials.toml: {e}");
-            eprintln!(
-                "Hint: Copy credentials.toml.example to credentials.toml and fill in your credentials"
-            );
-            std::process::exit(1);
-        }
-    };
+    // Create the player
+    let player = FakePlayer::new();
 
-    let creds: Credentials = match toml::from_str(&contents) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to parse credentials.toml: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    println!("Got app_id: {}", creds.app_id);
-
-    // Start session manager
-    let (mut manager, mut events) = match SessionManager::start(7864).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to start session manager: {e}");
-            std::process::exit(1);
-        }
-    };
+    // Start the session manager with our player as the handler
+    let (mut manager, mut broadcasts) = SessionManager::start(7864, player).await?;
 
     // Register device
-    let device = DeviceConfig::new("Fake Player", &creds.app_id);
-    println!("Device UUID: {}", device.uuid_formatted());
+    let device_config = DeviceConfig::new("Fake Player", &config.app_id);
+    manager.add_device(device_config).await?;
+    info!("Registered device: Fake Player");
 
-    if let Err(e) = manager.add_device(device).await {
-        eprintln!("Failed to add device: {e}");
-        std::process::exit(1);
-    }
+    info!("Fake player running. Press Ctrl+C to stop.");
+    info!("Select a device in the Qobuz app to connect.");
 
-    // Get a handle before spawning run() - this can be used concurrently
-    let handle = manager.handle();
-
-    println!();
-    println!("Fake player running!");
-    println!("  HTTP endpoints: http://0.0.0.0:7864");
-    println!("  mDNS service: Fake Player._qobuz-connect._tcp.local.");
-    println!();
-    println!("Waiting for controller to connect... (Press Ctrl+C to exit)");
-    println!();
-
-    // Spawn manager run loop (handles device selections)
-    tokio::spawn(async move {
+    // Spawn manager in background
+    let manager_handle = tokio::spawn(async move {
         if let Err(e) = manager.run().await {
-            eprintln!("Session manager error: {e}");
+            warn!("Manager error: {e}");
         }
     });
 
-    // Create fake player with 10 second heartbeat (matches C++ default)
-    let mut player = FakePlayer::new(Duration::from_secs(10));
-    let mut tick_interval = player.create_tick_interval();
-
-    // Event loop
+    // Main loop: handle broadcasts and ctrl+c
     loop {
         tokio::select! {
-            // Handle session events
-            Some(event) = events.recv() => {
-                match event {
-                    SessionEvent::Connected => {
+            Some(broadcast) = broadcasts.recv() => {
+                match broadcast {
+                    RendererBroadcast::Connected => {
                         info!("WebSocket connected");
                     }
-
-                    SessionEvent::Disconnected { session_id, reason } => {
-                        warn!("Disconnected (session {}): {:?}", session_id, reason);
-                        // Reset player state
-                        player.state = PlayState::Stopped;
-                        player.renderer_id = 0;
+                    RendererBroadcast::Disconnected { reason, .. } => {
+                        info!("Disconnected: {:?}", reason);
                     }
-
-                    SessionEvent::DeviceRegistered { device_uuid, renderer_id } => {
-                        info!(
-                            "Device registered: uuid={} renderer_id={}",
-                            Uuid::from_bytes(device_uuid),
-                            renderer_id
-                        );
-                        player.renderer_id = renderer_id;
+                    RendererBroadcast::DeviceRegistered { renderer_id, .. } => {
+                        info!("Device registered with renderer_id={}", renderer_id);
                     }
-
-                    SessionEvent::DeviceActive { renderer_id, .. } => {
-                        info!("Device is now ACTIVE! renderer_id={}", renderer_id);
-                        player.renderer_id = renderer_id;
-
-                        // === Activation Handshake ===
-                        // Report our initial state to the server immediately
-                        // Order matters: mute, volume, max quality, playback state
-                        info!("Sending activation handshake...");
-
-                        if let Err(e) = handle.report_volume_muted(player.muted).await {
-                            warn!("Failed to report mute state: {e}");
-                        }
-
-                        if let Err(e) = handle.report_volume(player.volume).await {
-                            warn!("Failed to report volume: {e}");
-                        }
-
-                        if let Err(e) = handle.report_max_audio_quality(AudioQuality::FlacHiRes192).await {
-                            warn!("Failed to report max audio quality: {e}");
-                        }
-
-                        if let Err(e) = handle.report_playback_state(
-                            renderer_id,
-                            player.state,
-                            player.position_ms,
-                            player.current_queue_item_id(),
-                        ).await {
-                            warn!("Failed to report playback state: {e}");
-                        }
-
-                        // Request queue and renderer state now that we're active
-                        info!("Requesting queue state...");
-                        if let Err(e) = handle.request_queue_state().await {
-                            warn!("Failed to request queue state: {e}");
-                        }
-
-                        info!("Requesting renderer state...");
-                        if let Err(e) = handle.request_renderer_state().await {
-                            warn!("Failed to request renderer state: {e}");
-                        }
-                    }
-
-                    SessionEvent::DeviceDeactivated { renderer_id, new_active_renderer_id, .. } => {
-                        warn!(
-                            "Device DEACTIVATED (was renderer_id={}), new active={}",
-                            renderer_id, new_active_renderer_id
-                        );
-                        player.state = PlayState::Stopped;
-                        player.renderer_id = 0;
-                    }
-
-                    SessionEvent::RendererAdded { renderer_id, name } => {
+                    RendererBroadcast::RendererAdded { renderer_id, name } => {
                         debug!("Other renderer added: {} (id={})", name, renderer_id);
                     }
-
-                    SessionEvent::RendererRemoved { renderer_id } => {
+                    RendererBroadcast::RendererRemoved { renderer_id } => {
                         debug!("Renderer removed: id={}", renderer_id);
                     }
-
-                    SessionEvent::ActiveRendererChanged { renderer_id } => {
-                        info!("Active renderer changed to id={}", renderer_id);
+                    RendererBroadcast::ActiveRendererChanged { renderer_id } => {
+                        debug!("Active renderer changed to: {}", renderer_id);
                     }
-
-                    SessionEvent::QueueUpdated { tracks, version } => {
-                        player.handle_queue_update(tracks, version);
+                    RendererBroadcast::RendererStateUpdated { renderer_id, state, position_ms, .. } => {
+                        debug!("Renderer {} state broadcast: {:?} at {}ms", renderer_id, state, position_ms);
                     }
-
-                    SessionEvent::RendererStateUpdated { renderer_id, state, position_ms, duration_ms, queue_index } => {
-                        if renderer_id == player.renderer_id || player.renderer_id == 0 {
-                            debug!(
-                                "Renderer state broadcast: {:?} at {}ms / {}ms, queue_index={}",
-                                state, position_ms, duration_ms, queue_index
-                            );
-                            // This is an informational broadcast - we don't sync from it or respond
-                            // We maintain our own playback state based on commands we receive
-                        }
-                    }
-
-                    SessionEvent::PlaybackCommand { renderer_id, state, position_ms } => {
-                        if renderer_id == player.renderer_id || player.renderer_id == 0 {
-                            player.handle_playback_command(state, position_ms);
-                            // Immediately report state back to server (protocol requirement)
-                            if player.renderer_id != 0 {
-                                if let Err(e) = handle.report_playback_state(
-                                    player.renderer_id,
-                                    player.state,
-                                    player.position_ms,
-                                    player.current_queue_item_id(),
-                                ).await {
-                                    warn!("Failed to report playback state: {e}");
-                                }
-                            }
-                        } else {
-                            debug!(
-                                "Ignoring playback command for renderer {} (we are {})",
-                                renderer_id, player.renderer_id
-                            );
-                        }
-                    }
-
-                    SessionEvent::VolumeCommand { renderer_id, volume } => {
-                        if renderer_id == player.renderer_id || player.renderer_id == 0 {
-                            player.handle_volume_command(volume);
-                            // Immediately report volume back to server (protocol requirement)
-                            if let Err(e) = handle.report_volume(player.volume).await {
-                                warn!("Failed to report volume: {e}");
-                            }
-                        }
-                    }
-
-                    SessionEvent::LoopModeChanged { mode } => {
-                        player.handle_loop_mode_change(mode);
-                    }
-
-                    SessionEvent::ShuffleModeChanged { enabled } => {
-                        player.handle_shuffle_mode_change(enabled);
-                    }
-
-                    // Broadcast events - informational only, no response needed
-                    SessionEvent::VolumeBroadcast { renderer_id, volume } => {
+                    RendererBroadcast::VolumeBroadcast { renderer_id, volume } => {
                         debug!("Volume broadcast: renderer {} -> {}", renderer_id, volume);
                     }
-
-                    SessionEvent::VolumeMutedBroadcast { renderer_id, muted } => {
+                    RendererBroadcast::VolumeMutedBroadcast { renderer_id, muted } => {
                         debug!("Mute broadcast: renderer {} -> {}", renderer_id, muted);
                     }
-
-                    SessionEvent::MaxAudioQualityBroadcast { renderer_id, quality } => {
+                    RendererBroadcast::MaxAudioQualityBroadcast { renderer_id, quality } => {
                         debug!("Max quality broadcast: renderer {} -> {:?}", renderer_id, quality);
                     }
-
-                    SessionEvent::FileAudioQualityBroadcast { renderer_id, sample_rate_hz } => {
+                    RendererBroadcast::FileAudioQualityBroadcast { renderer_id, sample_rate_hz } => {
                         debug!("File quality broadcast: renderer {} -> {}Hz", renderer_id, sample_rate_hz);
                     }
                 }
             }
-
-            // Handle playback tick (only when playing)
-            _ = tick_interval.tick() => {
-                if player.tick() && player.renderer_id != 0 {
-                    // Report state to server
-                    if let Err(e) = handle.report_playback_state(
-                        player.renderer_id,
-                        player.state,
-                        player.position_ms,
-                        player.current_queue_item_id(),
-                    ).await {
-                        warn!("Failed to report playback state: {e}");
-                    }
-                }
-            }
-
-            // Handle Ctrl+C
             _ = signal::ctrl_c() => {
-                println!("\nShutting down...");
+                info!("Shutting down...");
                 break;
             }
         }
     }
+
+    manager_handle.abort();
+    Ok(())
 }

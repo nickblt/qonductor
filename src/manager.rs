@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::discovery::{AudioQuality, DeviceConfig, DeviceRegistry, DeviceSelected};
-use crate::qconnect::{PlayState, SessionEvent, SessionHandle};
+use crate::discovery::{DeviceConfig, DeviceRegistry, DeviceSelected};
+use crate::qconnect::{RendererBroadcast, RendererHandler, SessionHandle, SharedHandler};
 use crate::{Error, Result};
 
 /// Handle for interacting with sessions while the manager is running.
@@ -22,36 +22,9 @@ pub struct SessionManagerHandle {
 }
 
 impl SessionManagerHandle {
-    /// Report playback state to the server.
-    ///
-    /// Call this when playback state changes (play, pause, stop, seek).
-    pub async fn report_playback_state(
-        &self,
-        renderer_id: u64,
-        state: PlayState,
-        position_ms: u32,
-        current_queue_item_id: Option<i32>,
-    ) -> Result<()> {
-        let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
-        for session in handles {
-            if let Ok(()) = session
-                .report_playback_state(renderer_id, state, position_ms, current_queue_item_id)
-                .await
-            {
-                return Ok(());
-            }
-        }
-
-        Err(Error::Protocol(format!(
-            "No session found for renderer {}",
-            renderer_id
-        )))
-    }
-
     /// Request current queue state from the server.
     ///
-    /// Call this after becoming the active renderer to get the current queue.
-    /// The server will respond with a `QueueUpdated` event.
+    /// The server will respond by calling `handler.on_queue_update()`.
     pub async fn request_queue_state(&self) -> Result<()> {
         let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
         for session in handles {
@@ -65,69 +38,11 @@ impl SessionManagerHandle {
 
     /// Request current renderer state from the server.
     ///
-    /// Call this after becoming the active renderer to get the current playback state.
-    /// The server will respond with a `RendererStateUpdated` event.
+    /// The server will respond with a `RendererStateUpdated` broadcast.
     pub async fn request_renderer_state(&self) -> Result<()> {
         let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
         for session in handles {
             if let Ok(()) = session.request_renderer_state().await {
-                return Ok(());
-            }
-        }
-
-        Err(Error::Protocol("No active session".to_string()))
-    }
-
-    /// Report volume to the server.
-    ///
-    /// Call this after receiving a volume command or during activation handshake.
-    pub async fn report_volume(&self, volume: u32) -> Result<()> {
-        let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
-        for session in handles {
-            if let Ok(()) = session.report_volume(volume).await {
-                return Ok(());
-            }
-        }
-
-        Err(Error::Protocol("No active session".to_string()))
-    }
-
-    /// Report volume muted state to the server.
-    ///
-    /// Call this during activation handshake or when mute state changes.
-    pub async fn report_volume_muted(&self, muted: bool) -> Result<()> {
-        let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
-        for session in handles {
-            if let Ok(()) = session.report_volume_muted(muted).await {
-                return Ok(());
-            }
-        }
-
-        Err(Error::Protocol("No active session".to_string()))
-    }
-
-    /// Report max audio quality capability to the server.
-    ///
-    /// Call this during activation handshake to inform the server of our capabilities.
-    pub async fn report_max_audio_quality(&self, quality: AudioQuality) -> Result<()> {
-        let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
-        for session in handles {
-            if let Ok(()) = session.report_max_audio_quality(quality).await {
-                return Ok(());
-            }
-        }
-
-        Err(Error::Protocol("No active session".to_string()))
-    }
-
-    /// Report actual file audio quality (sample rate) to the server.
-    ///
-    /// Call this after loading a track to report the actual sample rate in Hz
-    /// (e.g., 44100, 96000, 192000).
-    pub async fn report_file_audio_quality(&self, sample_rate_hz: u32) -> Result<()> {
-        let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
-        for session in handles {
-            if let Ok(()) = session.report_file_audio_quality(sample_rate_hz).await {
                 return Ok(());
             }
         }
@@ -141,25 +56,28 @@ impl SessionManagerHandle {
 /// This is the main entry point for using Qobuz Connect. It handles:
 /// - Device registration and mDNS announcements
 /// - Automatic session creation when devices are selected
-/// - Event routing from all sessions to a single channel
+/// - Calling [`RendererHandler`] methods for commands and sending responses automatically
 ///
 /// Each device gets its own WebSocket connection to the Qobuz server.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let (mut manager, mut events) = SessionManager::start(7864).await?;
+/// struct MyPlayer { /* ... */ }
+/// impl RendererHandler for MyPlayer { /* ... */ }
+///
+/// let player = Arc::new(Mutex::new(MyPlayer::new()));
+/// let (mut manager, mut broadcasts) = SessionManager::start(7864, player).await?;
 /// manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
-/// manager.add_device(DeviceConfig::new("Kitchen", &app_id)).await?;
 ///
 /// // Spawn manager to handle device selections
 /// tokio::spawn(async move { manager.run().await });
 ///
-/// // Handle events
-/// while let Some(event) = events.recv().await {
-///     match event {
-///         SessionEvent::PlaybackCommand { renderer_id, state, .. } => {
-///             // Handle playback
+/// // Handle broadcasts (optional - informational only)
+/// while let Some(broadcast) = broadcasts.recv().await {
+///     match broadcast {
+///         RendererBroadcast::RendererStateUpdated { renderer_id, state, .. } => {
+///             println!("Renderer {} state: {:?}", renderer_id, state);
 ///         }
 ///         _ => {}
 ///     }
@@ -170,35 +88,44 @@ pub struct SessionManager {
     device_rx: mpsc::Receiver<DeviceSelected>,
     /// Sessions keyed by device_uuid (each device gets its own connection).
     sessions: Arc<Mutex<HashMap<[u8; 16], Arc<SessionHandle>>>>,
-    event_tx: mpsc::Sender<SessionEvent>,
+    /// Handler for renderer commands (shared across all sessions).
+    handler: SharedHandler,
+    /// Channel for broadcast events.
+    broadcast_tx: mpsc::Sender<RendererBroadcast>,
 }
 
 impl SessionManager {
     /// Start the session manager with HTTP server on the given port.
     ///
-    /// Returns the manager and a receiver for all session events.
+    /// Returns the manager and a receiver for broadcast events.
     ///
     /// # Arguments
     ///
     /// * `port` - Port for the HTTP server. Use 0 for automatic port selection.
+    /// * `handler` - Implementation of [`RendererHandler`] for handling commands.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let (mut manager, mut events) = SessionManager::start(7864).await?;
+    /// let player = Arc::new(Mutex::new(MyPlayer::new()));
+    /// let (mut manager, mut broadcasts) = SessionManager::start(7864, player).await?;
     /// ```
-    pub async fn start(port: u16) -> Result<(Self, mpsc::Receiver<SessionEvent>)> {
+    pub async fn start<H: RendererHandler>(
+        port: u16,
+        handler: H,
+    ) -> Result<(Self, mpsc::Receiver<RendererBroadcast>)> {
         let (registry, device_rx) = DeviceRegistry::start(port).await?;
-        let (event_tx, event_rx) = mpsc::channel(100);
+        let (broadcast_tx, broadcast_rx) = mpsc::channel(100);
 
         Ok((
             Self {
                 registry,
                 device_rx,
                 sessions: Arc::new(Mutex::new(HashMap::new())),
-                event_tx,
+                handler: Arc::new(Mutex::new(handler)),
+                broadcast_tx,
             },
-            event_rx,
+            broadcast_rx,
         ))
     }
 
@@ -236,7 +163,7 @@ impl SessionManager {
     /// Get a handle for interacting with sessions.
     ///
     /// The handle can be cloned and used from multiple tasks while `run()` is active.
-    /// Use this to call `report_playback_state()` and `request_queue_state()`.
+    /// Use this to call `request_queue_state()` and `request_renderer_state()`.
     ///
     /// # Example
     ///
@@ -251,52 +178,6 @@ impl SessionManager {
         SessionManagerHandle {
             sessions: Arc::clone(&self.sessions),
         }
-    }
-
-    /// Report playback state to the server.
-    ///
-    /// Call this when playback state changes (play, pause, stop, seek).
-    pub async fn report_playback_state(
-        &self,
-        renderer_id: u64,
-        state: PlayState,
-        position_ms: u32,
-        current_queue_item_id: Option<i32>,
-    ) -> Result<()> {
-        // Find the session that might own this renderer
-        // Since we don't track renderer_id -> session mapping, try all sessions
-        // Clone handles so we don't hold lock across await
-        let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
-        for session in handles {
-            // Try to send - if the session doesn't have this renderer, it will still work
-            // (the command is fire-and-forget for the renderer_id lookup)
-            if let Ok(()) = session
-                .report_playback_state(renderer_id, state, position_ms, current_queue_item_id)
-                .await
-            {
-                return Ok(());
-            }
-        }
-
-        Err(Error::Protocol(format!(
-            "No session found for renderer {}",
-            renderer_id
-        )))
-    }
-
-    /// Request current queue state from the server.
-    ///
-    /// Call this after becoming the active renderer to get the current queue.
-    /// The server will respond with a `QueueUpdated` event.
-    pub async fn request_queue_state(&self) -> Result<()> {
-        let handles: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
-        for session in handles {
-            if let Ok(()) = session.request_queue_state().await {
-                return Ok(());
-            }
-        }
-
-        Err(Error::Protocol("No active session".to_string()))
     }
 
     /// Run the manager event loop.
@@ -355,7 +236,8 @@ impl SessionManager {
         let handle = SessionHandle::connect(
             &selected.session_info,
             &device_config,
-            self.event_tx.clone(),
+            Arc::clone(&self.handler),
+            self.broadcast_tx.clone(),
             on_disconnect,
         )
         .await?;
