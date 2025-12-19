@@ -12,7 +12,7 @@ use crate::proto::qconnect::{
     Position, QConnectBatch, QConnectMessage, QConnectMessageType, QueueRendererState,
     RndrSrvrStateUpdated,
 };
-use crate::protocol::{IncomingMessage, Session};
+use crate::transport::{IncomingMessage, Transport};
 use crate::{Error, Result};
 
 /// High-level events from a Qobuz Connect session.
@@ -211,7 +211,7 @@ impl SessionHandle {
         );
 
         // Connect and set up the WebSocket
-        let mut ws = Session::connect(&session_info.ws_endpoint, &session_info.ws_jwt).await?;
+        let mut ws = Transport::connect(&session_info.ws_endpoint, &session_info.ws_jwt).await?;
         ws.subscribe_default().await?;
         ws.join_session(&device_config.device_uuid, &device_config.friendly_name)
             .await?;
@@ -317,7 +317,7 @@ struct SessionState {
 /// and commands from the SessionHandle.
 struct SessionRunner {
     session_id: String,
-    ws: Session,
+    ws: Transport,
     device_uuid: [u8; 16],
     device_name: String,
     renderer_id: u64,

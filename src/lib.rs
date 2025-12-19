@@ -33,12 +33,12 @@ pub mod types;
 
 // Internal modules
 pub(crate) mod discovery;
-pub(crate) mod protocol;
-pub(crate) mod session;
+pub(crate) mod qconnect;
+pub(crate) mod transport;
 
 // Re-export main public API
 pub use manager::SessionManager;
-pub use session::{BufferState, LoopMode, PlayState, QueueTrack, SessionEvent};
+pub use qconnect::{BufferState, LoopMode, PlayState, QueueTrack, SessionEvent};
 pub use discovery::{DeviceConfig, DeviceType, AudioQuality};
 
 pub use error::Error;

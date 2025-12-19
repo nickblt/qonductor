@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::discovery::{DeviceConfig, DeviceRegistry, DeviceSelected};
-use crate::session::{PlayState, SessionEvent, SessionHandle};
+use crate::qconnect::{PlayState, SessionEvent, SessionHandle};
 use crate::{Error, Result};
 
 /// Manager for Qobuz Connect sessions.

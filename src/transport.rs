@@ -41,13 +41,13 @@ pub enum IncomingMessage {
 #[allow(dead_code)] // Useful constant for future use
 pub const DEFAULT_WS_URL: &str = "wss://play.qobuz.com/ws";
 
-/// WebSocket session for QConnect protocol.
-pub struct Session {
+/// WebSocket transport for QConnect protocol.
+pub struct Transport {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     msg_id: u32,
 }
 
-impl Session {
+impl Transport {
     /// Connect to QConnect WebSocket at the given endpoint.
     pub async fn connect(endpoint: &str, jwt: &str) -> Result<Self> {
         debug!(endpoint, "Connecting to WebSocket");
