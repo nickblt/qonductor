@@ -270,7 +270,7 @@ impl Transport {
             match msg.map_err(Box::new)? {
                 WsMessage::Binary(data) => {
                     trace!(len = data.len(), "RX: Binary message");
-                    if let Some(incoming) = self.parse_envelope(&data)? {
+                    if let Some(incoming) = Self::parse_envelope(&data)? {
                         return Ok(Some(incoming));
                     }
                 }
@@ -298,7 +298,7 @@ impl Transport {
     }
 
     /// Parse incoming WebSocket envelope message.
-    fn parse_envelope(&self, data: &[u8]) -> Result<Option<IncomingMessage>> {
+    fn parse_envelope(data: &[u8]) -> Result<Option<IncomingMessage>> {
         if data.is_empty() {
             return Ok(None);
         }
@@ -436,4 +436,146 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    /// Helper to build an envelope: [msg_type: 1 byte] [len: varint] [payload]
+    fn build_envelope(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut buf = vec![msg_type];
+        encode_varint(payload.len() as u64, &mut buf);
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    #[test]
+    fn parse_envelope_empty_returns_none() {
+        let result = Transport::parse_envelope(&[]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_envelope_incomplete_returns_none() {
+        // msg_type=6, varint says 100 bytes, but only 5 bytes of payload
+        let mut data = vec![6u8];
+        encode_varint(100, &mut data);
+        data.extend_from_slice(&[1, 2, 3, 4, 5]);
+
+        let result = Transport::parse_envelope(&data).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_envelope_unknown_type_returns_other() {
+        let payload = b"some data";
+        let data = build_envelope(42, payload);
+
+        let result = Transport::parse_envelope(&data).unwrap();
+        match result {
+            Some(IncomingMessage::Other { msg_type, data }) => {
+                assert_eq!(msg_type, 42);
+                assert_eq!(data, payload);
+            }
+            _ => panic!("Expected IncomingMessage::Other"),
+        }
+    }
+
+    #[test]
+    fn parse_envelope_error_type_returns_other() {
+        let payload = b"error message";
+        let data = build_envelope(9, payload); // 9 = ERROR
+
+        let result = Transport::parse_envelope(&data).unwrap();
+        match result {
+            Some(IncomingMessage::Other { msg_type, data }) => {
+                assert_eq!(msg_type, 9);
+                assert_eq!(data, payload);
+            }
+            _ => panic!("Expected IncomingMessage::Other for error type"),
+        }
+    }
+
+    #[test]
+    fn parse_envelope_payload_without_inner_batch() {
+        // Build a Payload protobuf without inner payload
+        let payload_proto = Payload {
+            msg_id: Some(123),
+            msg_date: Some(1000),
+            proto: Some(1),
+            src: None,
+            dests: vec![],
+            payload: None, // No inner payload
+        };
+        let encoded = payload_proto.encode_to_vec();
+        let data = build_envelope(6, &encoded); // 6 = PAYLOAD
+
+        let result = Transport::parse_envelope(&data).unwrap();
+        match result {
+            Some(IncomingMessage::Payload(p)) => {
+                assert_eq!(p.msg_id, Some(123));
+                assert_eq!(p.proto, Some(1));
+            }
+            _ => panic!("Expected IncomingMessage::Payload"),
+        }
+    }
+
+    #[test]
+    fn parse_envelope_payload_with_batch() {
+        // Build a QConnectBatch
+        let batch = QConnectBatch {
+            messages_time: Some(2000),
+            messages_id: Some(1),
+            messages: vec![],
+        };
+        let batch_encoded = batch.encode_to_vec();
+
+        // Wrap in Payload
+        let payload_proto = Payload {
+            msg_id: Some(456),
+            msg_date: Some(1000),
+            proto: Some(1),
+            src: None,
+            dests: vec![],
+            payload: Some(batch_encoded),
+        };
+        let encoded = payload_proto.encode_to_vec();
+        let data = build_envelope(6, &encoded);
+
+        let result = Transport::parse_envelope(&data).unwrap();
+        match result {
+            Some(IncomingMessage::Batch(b)) => {
+                assert_eq!(b.messages_time, Some(2000));
+                assert_eq!(b.messages_id, Some(1));
+                assert!(b.messages.is_empty());
+            }
+            _ => panic!("Expected IncomingMessage::Batch"),
+        }
+    }
+
+    #[test]
+    fn parse_envelope_payload_with_invalid_inner_returns_payload() {
+        // Payload with garbage inner data (not valid QConnectBatch)
+        let payload_proto = Payload {
+            msg_id: Some(789),
+            msg_date: Some(1000),
+            proto: Some(1),
+            src: None,
+            dests: vec![],
+            payload: Some(vec![0xff, 0xff, 0xff]), // Invalid protobuf
+        };
+        let encoded = payload_proto.encode_to_vec();
+        let data = build_envelope(6, &encoded);
+
+        let result = Transport::parse_envelope(&data).unwrap();
+        match result {
+            Some(IncomingMessage::Payload(p)) => {
+                assert_eq!(p.msg_id, Some(789));
+                // Inner decode failed, but we still get the Payload
+            }
+            _ => panic!("Expected IncomingMessage::Payload when inner decode fails"),
+        }
+    }
 }
