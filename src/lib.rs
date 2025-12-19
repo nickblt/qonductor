@@ -44,7 +44,7 @@ pub use qconnect::{
     RendererHandler,
 };
 pub use proto::qconnect::{BufferState, DeviceType, LoopMode, PlayingState};
-pub use config::{audio_quality, DeviceConfig};
+pub use config::{AudioQuality, DeviceConfig};
 pub use discovery::DeviceTypeExt;
 pub use transport::format_qconnect_message;
 

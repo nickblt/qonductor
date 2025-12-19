@@ -22,6 +22,7 @@ use crate::proto::qconnect::{
     Authenticate, CtrlSrvrJoinSession, DeviceCapabilities, DeviceInfo, DeviceType, Payload,
     QCloudMessageType, QConnectBatch, QConnectMessage, QConnectMessageType, Subscribe,
 };
+use crate::config::AudioQuality;
 use crate::{Error, Result};
 
 /// Default QConnect WebSocket URL.
@@ -105,8 +106,8 @@ impl Transport {
             serial_number: None,
             r#type: Some(DeviceType::Speaker as i32),
             capabilities: Some(DeviceCapabilities {
-                min_audio_quality: Some(1),
-                max_audio_quality: Some(4),
+                min_audio_quality: Some(AudioQuality::Mp3 as i32),
+                max_audio_quality: Some(AudioQuality::HiRes192 as i32),
                 volume_remote_control: Some(2),
             }),
             software_version: Some(format!("qonductor-{}", env!("CARGO_PKG_VERSION"))),

@@ -6,12 +6,17 @@ use uuid::Uuid;
 use crate::proto::qconnect::DeviceType;
 
 /// Audio quality capability levels.
-/// 1 = MP3, 2 = FLAC Lossless, 3 = HiRes 96kHz, 4 = HiRes 192kHz
-pub mod audio_quality {
-    pub const MP3: i32 = 1;
-    pub const FLAC_LOSSLESS: i32 = 2;
-    pub const HIRES_96: i32 = 3;
-    pub const HIRES_192: i32 = 4;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum AudioQuality {
+    /// MP3 quality.
+    Mp3 = 1,
+    /// FLAC lossless (44.1/48 kHz).
+    FlacLossless = 2,
+    /// Hi-Res up to 96 kHz.
+    HiRes96 = 3,
+    /// Hi-Res up to 192 kHz.
+    HiRes192 = 4,
 }
 
 /// Configuration for a Qobuz Connect device.
@@ -27,9 +32,8 @@ pub struct DeviceConfig {
     pub brand: String,
     /// Model name for display.
     pub model: String,
-    /// Maximum audio quality capability level (1-4).
-    /// Use constants from `audio_quality` module.
-    pub max_audio_quality: i32,
+    /// Maximum audio quality capability level.
+    pub max_audio_quality: AudioQuality,
     /// Qobuz app_id (required for get-connect-info).
     pub app_id: String,
 }
@@ -52,7 +56,7 @@ impl DeviceConfig {
             device_type: DeviceType::Speaker,
             brand: "Qonductor".to_string(),
             model: "Qonductor Rust".to_string(),
-            max_audio_quality: audio_quality::HIRES_192,
+            max_audio_quality: AudioQuality::HiRes192,
             app_id: app_id.into(),
         }
     }
@@ -69,7 +73,7 @@ impl DeviceConfig {
             device_type: DeviceType::Speaker,
             brand: "Qonductor".to_string(),
             model: "Qonductor Rust".to_string(),
-            max_audio_quality: audio_quality::HIRES_192,
+            max_audio_quality: AudioQuality::HiRes192,
             app_id: app_id.into(),
         }
     }

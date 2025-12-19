@@ -21,7 +21,7 @@ use uuid::Uuid;
 use zeroconf_tokio::prelude::*;
 use zeroconf_tokio::{MdnsService, MdnsServiceAsync, ServiceType, TxtRecord};
 
-use crate::config::{DeviceConfig, SessionInfo};
+use crate::config::{AudioQuality, DeviceConfig, SessionInfo};
 use crate::proto::qconnect::DeviceType;
 use crate::{Error, Result};
 
@@ -53,13 +53,12 @@ impl DeviceTypeExt for DeviceType {
 }
 
 /// Convert audio quality capability level to display string for HTTP responses.
-fn audio_quality_display(level: i32) -> &'static str {
-    match level {
-        1 => "MP3",
-        2 => "LOSSLESS",
-        3 => "HIRES_L2",
-        4 => "HIRES_L3",
-        _ => "HIRES_L3",
+fn audio_quality_display(quality: AudioQuality) -> &'static str {
+    match quality {
+        AudioQuality::Mp3 => "MP3",
+        AudioQuality::FlacLossless => "LOSSLESS",
+        AudioQuality::HiRes96 => "HIRES_L2",
+        AudioQuality::HiRes192 => "HIRES_L3",
     }
 }
 
