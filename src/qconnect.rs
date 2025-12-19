@@ -10,8 +10,8 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use futures::stream::Stream;
 use futures::StreamExt;
+use futures::stream::Stream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, interval};
@@ -19,11 +19,10 @@ use tracing::{debug, info, warn};
 
 use crate::config::{DeviceConfig, SessionInfo};
 use crate::proto::qconnect::{
-    BufferState, CtrlSrvrAskForQueueState, CtrlSrvrAskForRendererState,
-    CtrlSrvrSetActiveRenderer, LoopMode, PlayingState, Position, QConnectMessage,
-    QConnectMessageType, QueueRendererState, QueueVersion, RndrSrvrFileAudioQualityChanged,
-    RndrSrvrMaxAudioQualityChanged, RndrSrvrStateUpdated, RndrSrvrVolumeChanged,
-    RndrSrvrVolumeMuted,
+    BufferState, CtrlSrvrAskForQueueState, CtrlSrvrAskForRendererState, CtrlSrvrSetActiveRenderer,
+    LoopMode, PlayingState, Position, QConnectMessage, QConnectMessageType, QueueRendererState,
+    QueueVersion, RndrSrvrFileAudioQualityChanged, RndrSrvrMaxAudioQualityChanged,
+    RndrSrvrStateUpdated, RndrSrvrVolumeChanged, RndrSrvrVolumeMuted,
 };
 use crate::transport::{Transport, TransportWriter};
 use crate::{Error, Result};
@@ -54,8 +53,8 @@ pub struct PlaybackResponse {
 /// Playback command from the server.
 #[derive(Debug, Clone)]
 pub struct PlaybackCommand {
-    /// Requested playback state.
-    pub state: PlayingState,
+    /// Requested playback state, or None if server didn't specify (seek-only command).
+    pub state: Option<PlayingState>,
     /// Requested position (seek), if any.
     pub position_ms: Option<u32>,
     /// Current queue item ID to play (if specified).
@@ -147,6 +146,12 @@ pub trait RendererHandler: Send + 'static {
     ///
     /// Return `Some(state)` to send a position update, or `None` to skip.
     fn on_heartbeat(&mut self, renderer_id: u64) -> Option<PlaybackResponse>;
+
+    /// Called when receiving state from another active renderer before we become active.
+    ///
+    /// Use this to restore playback position when taking over from another renderer.
+    /// The position and queue index represent where the previous renderer was playing.
+    fn on_restore_state(&mut self, position_ms: u32, queue_index: Option<u32>);
 }
 
 // ============================================================================
@@ -200,10 +205,7 @@ pub enum RendererBroadcast {
     VolumeMutedBroadcast { renderer_id: u64, muted: bool },
 
     /// Max audio quality changed broadcast (capability level).
-    MaxAudioQualityBroadcast {
-        renderer_id: u64,
-        quality: i32,
-    },
+    MaxAudioQualityBroadcast { renderer_id: u64, quality: i32 },
 
     /// File audio quality changed broadcast.
     /// Sample rate is in Hz (e.g., 44100, 96000, 192000).
@@ -212,7 +214,6 @@ pub enum RendererBroadcast {
         sample_rate_hz: u32,
     },
 }
-
 
 /// A track in the queue.
 #[derive(Debug, Clone)]
@@ -596,7 +597,11 @@ impl SessionRunner {
         self.writer.send(msg).await
     }
 
-    /// Send the activation handshake (muted, volume, max quality, playback state).
+    /// Send the activation handshake (muted, volume, max quality).
+    ///
+    /// Note: Playback state is NOT sent here. We trigger a heartbeat immediately
+    /// after activation to report state, allowing the handler to use any restored
+    /// position from the previous renderer.
     async fn send_activation_handshake(&mut self, state: &ActivationState) -> Result<()> {
         // Send muted state
         self.do_report_volume_muted(state.muted).await?;
@@ -606,9 +611,6 @@ impl SessionRunner {
 
         // Send max quality
         self.do_report_max_audio_quality(state.max_quality).await?;
-
-        // Send playback state
-        self.send_playback_response(&state.playback).await?;
 
         Ok(())
     }
@@ -705,6 +707,12 @@ impl SessionRunner {
                         uuid.copy_from_slice(&uuid_bytes);
                         self.state.session_uuid = Some(uuid);
                     }
+
+                    // Request renderer state to get current playback position
+                    // This allows us to restore position when taking over from another renderer
+                    if let Err(e) = self.do_request_renderer_state().await {
+                        warn!(error = %e, "Failed to request renderer state");
+                    }
                 }
             }
 
@@ -753,13 +761,7 @@ impl SessionRunner {
             // SrvrRndrSetState (41) - Server telling us to change playback state
             t if t == QConnectMessageType::MessageTypeSrvrRndrSetState as i32 => {
                 if let Some(ss) = msg.srvr_rndr_set_state {
-                    let state = ss
-                        .playing_state
-                        .and_then(|i| PlayingState::try_from(i).ok())
-                        .unwrap_or(PlayingState::Stopped);
-                    let position_ms = ss.current_position;
-                    let queue_item_id =
-                        ss.current_queue_item.as_ref().and_then(|q| q.queue_item_id);
+                    // Extract queue info (for future use)
                     let server_queue_version = ss
                         .queue_version
                         .as_ref()
@@ -768,18 +770,29 @@ impl SessionRunner {
                         ss.next_queue_item.as_ref().and_then(|q| q.queue_item_id);
                     let _ = (server_queue_version, next_queue_item_id); // TODO: use these
 
-                    // Call handler and send response
-                    let cmd = PlaybackCommand {
-                        state,
-                        position_ms,
-                        queue_item_id,
-                    };
-                    let response = {
-                        let mut handler = self.handler.lock().unwrap();
-                        handler.on_playback_command(self.renderer_id, cmd)
-                    };
-                    if let Err(e) = self.send_playback_response(&response).await {
-                        warn!(error = %e, "Failed to send playback response");
+                    // Only respond if there's an actual state change request
+                    // Messages with just queue_version/next_queue_item are informational
+                    if ss.playing_state.is_some() || ss.current_position.is_some() {
+                        let state = ss
+                            .playing_state
+                            .and_then(|i| PlayingState::try_from(i).ok());
+                        let position_ms = ss.current_position;
+                        let queue_item_id =
+                            ss.current_queue_item.as_ref().and_then(|q| q.queue_item_id);
+
+                        // Call handler and send response
+                        let cmd = PlaybackCommand {
+                            state,
+                            position_ms,
+                            queue_item_id,
+                        };
+                        let response = {
+                            let mut handler = self.handler.lock().unwrap();
+                            handler.on_playback_command(self.renderer_id, cmd)
+                        };
+                        if let Err(e) = self.send_playback_response(&response).await {
+                            warn!(error = %e, "Failed to send playback response");
+                        }
                     }
                 }
             }
@@ -794,6 +807,9 @@ impl SessionRunner {
                         self.is_active = true;
 
                         // Call handler and send activation handshake
+                        // Note: We do NOT send playback state here. The server will send us
+                        // SrvrRndrSetState with the current position, and we respond to that.
+                        // This matches the C++ implementation behavior.
                         let activation_state = {
                             let mut handler = self.handler.lock().unwrap();
                             handler.on_activate(self.renderer_id)
@@ -940,6 +956,18 @@ impl SessionRunner {
                         let position_ms = state.current_position.and_then(|p| p.value).unwrap_or(0);
                         let duration_ms = state.duration.unwrap_or(0);
                         let queue_index = state.current_queue_index.unwrap_or(0);
+
+                        // If this is from another renderer and we're not active yet,
+                        // restore the position so we can continue from where they left off
+                        if rid != self.renderer_id && !self.is_active {
+                            let queue_idx = if queue_index > 0 {
+                                Some(queue_index)
+                            } else {
+                                None
+                            };
+                            let mut handler = self.handler.lock().unwrap();
+                            handler.on_restore_state(position_ms, queue_idx);
+                        }
 
                         let _ = self
                             .broadcast_tx

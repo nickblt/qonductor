@@ -14,6 +14,7 @@ use rand::{Rng, thread_rng};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
+use std::time::Instant;
 use tokio::signal;
 use tracing::{debug, info, warn};
 
@@ -68,7 +69,10 @@ impl TrackDurationProvider for RandomDurationProvider {
 struct FakePlayer {
     // Playback state
     state: PlayingState,
-    position_ms: u32,
+    /// Position in ms at the time of `position_timestamp`
+    position_at_timestamp: u32,
+    /// When position_at_timestamp was recorded
+    position_timestamp: Instant,
     current_track_index: Option<usize>,
 
     // Queue
@@ -91,7 +95,8 @@ impl FakePlayer {
     fn new() -> Self {
         Self {
             state: PlayingState::Stopped,
-            position_ms: 0,
+            position_at_timestamp: 0,
+            position_timestamp: Instant::now(),
             current_track_index: None,
             queue: Vec::new(),
             loop_mode: LoopMode::Off,
@@ -101,6 +106,22 @@ impl FakePlayer {
             renderer_id: 0,
             duration_provider: Box::new(RandomDurationProvider::new()),
         }
+    }
+
+    /// Calculate current position based on elapsed time since last update.
+    fn current_position_ms(&self) -> u32 {
+        if self.state == PlayingState::Playing {
+            let elapsed = self.position_timestamp.elapsed().as_millis() as u32;
+            self.position_at_timestamp.saturating_add(elapsed)
+        } else {
+            self.position_at_timestamp
+        }
+    }
+
+    /// Set position and record the timestamp.
+    fn set_position(&mut self, position_ms: u32) {
+        self.position_at_timestamp = position_ms;
+        self.position_timestamp = Instant::now();
     }
 
     fn current_track(&self) -> Option<&QueueTrack> {
@@ -126,37 +147,35 @@ impl FakePlayer {
         PlaybackResponse {
             state: self.state,
             buffer_state: BufferState::Ok,
-            position_ms: self.position_ms,
+            position_ms: self.current_position_ms(),
             duration_ms: self.current_duration(),
             queue_item_id: self.current_queue_item_id(),
             next_queue_item_id: self.next_queue_item_id(),
         }
     }
 
-    /// Advance position (called by heartbeat). Returns true if state changed.
+    /// Check if track ended (called by heartbeat). Returns true if still playing.
     fn tick(&mut self) -> bool {
         if self.state != PlayingState::Playing {
             return false;
         }
 
-        // Advance position by ~10 seconds
-        self.position_ms += 10_000;
-
-        // Check if track ended
+        // Check if track ended using calculated position
+        let current_pos = self.current_position_ms();
         if let Some(duration) = self.current_duration()
-            && self.position_ms >= duration
+            && current_pos >= duration
         {
             return self.advance_track();
         }
 
-        true // State changed (position advanced)
+        true // Still playing
     }
 
     fn advance_track(&mut self) -> bool {
         let queue_len = self.queue.len();
         if queue_len == 0 {
             self.state = PlayingState::Stopped;
-            self.position_ms = 0;
+            self.set_position(0);
             return true;
         }
 
@@ -167,7 +186,7 @@ impl FakePlayer {
             LoopMode::Off | LoopMode::Unknown => {
                 if current + 1 >= queue_len {
                     self.state = PlayingState::Stopped;
-                    self.position_ms = 0;
+                    self.set_position(0);
                     return true;
                 }
                 current + 1
@@ -175,7 +194,7 @@ impl FakePlayer {
         };
 
         self.current_track_index = Some(next);
-        self.position_ms = 0;
+        self.set_position(0);
 
         if let Some(track) = self.queue.get(next) {
             info!(
@@ -199,10 +218,21 @@ impl RendererHandler for FakePlayer {
     fn on_playback_command(&mut self, _renderer_id: u64, cmd: PlaybackCommand) -> PlaybackResponse {
         info!(?cmd.state, ?cmd.position_ms, ?cmd.queue_item_id, "Playback command received");
 
-        self.state = cmd.state;
+        let was_playing = self.state == PlayingState::Playing;
+        let new_state = cmd.state.unwrap_or(self.state); // None means keep current state
+
+        // Handle position: if specified, use it; if transitioning, snapshot current
         if let Some(pos) = cmd.position_ms {
-            self.position_ms = pos;
+            self.set_position(pos);
+        } else if !was_playing && new_state == PlayingState::Playing {
+            // Starting playback - snapshot current position so elapsed time counts from now
+            self.set_position(self.current_position_ms());
+        } else if was_playing && new_state != PlayingState::Playing {
+            // Stopping/pausing - snapshot the current calculated position
+            self.set_position(self.current_position_ms());
         }
+
+        self.state = new_state;
 
         // If server specified a queue item, switch to it
         if let Some(queue_item_id) = cmd.queue_item_id
@@ -212,9 +242,9 @@ impl RendererHandler for FakePlayer {
         }
 
         // Start playing first track if we have a queue and not already on a track
+        // Don't reset position - it may have been set by a prior seek command
         if self.state == PlayingState::Playing && self.current_track_index.is_none() && !self.queue.is_empty() {
             self.current_track_index = Some(0);
-            self.position_ms = 0;
         }
 
         self.playback_response()
@@ -263,7 +293,7 @@ impl RendererHandler for FakePlayer {
             if self.current_track_index.is_none() {
                 // Track was removed, stop playback
                 self.state = PlayingState::Stopped;
-                self.position_ms = 0;
+                self.set_position(0);
             }
         }
         // Don't auto-select track 0 - wait for server to tell us which track via SetState
@@ -282,12 +312,26 @@ impl RendererHandler for FakePlayer {
     fn on_heartbeat(&mut self, _renderer_id: u64) -> Option<PlaybackResponse> {
         if self.tick() && self.state == PlayingState::Playing {
             debug!(
-                position_ms = self.position_ms,
+                position_ms = self.current_position_ms(),
                 "Heartbeat"
             );
             Some(self.playback_response())
         } else {
             None
+        }
+    }
+
+    fn on_restore_state(&mut self, position_ms: u32, queue_index: Option<u32>) {
+        info!(
+            position_ms,
+            ?queue_index,
+            "Restoring state from previous renderer"
+        );
+        self.set_position(position_ms);
+        if let Some(idx) = queue_index {
+            // Queue index from server is 1-based queue_item_id, but we store 0-based index
+            // We'll update this when we get the queue and can map queue_item_id to index
+            self.current_track_index = Some(idx as usize);
         }
     }
 }
