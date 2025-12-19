@@ -39,10 +39,12 @@ pub(crate) mod transport;
 // Re-export main public API
 pub use manager::{SessionManager, SessionManagerHandle};
 pub use qconnect::{
-    ActivationState, BufferState, LoopMode, PlayState, PlaybackCommand, PlaybackResponse,
-    QueueTrack, RendererBroadcast, RendererHandler,
+    ActivationState, PlaybackCommand, PlaybackResponse, QueueTrack, RendererBroadcast,
+    RendererHandler,
 };
-pub use discovery::{DeviceConfig, DeviceType, AudioQuality};
+pub use proto::qconnect::{BufferState, DeviceType, LoopMode, PlayingState};
+pub use discovery::{AudioQuality, DeviceConfig, DeviceTypeExt};
+pub use transport::format_qconnect_message;
 
 pub use error::Error;
 pub use types::*;

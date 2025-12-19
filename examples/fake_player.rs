@@ -7,8 +7,8 @@
 //! Run with debug: RUST_LOG=qonductor=debug,fake_player=debug cargo run --example fake_player
 
 use qonductor::{
-    ActivationState, AudioQuality, BufferState, DeviceConfig, LoopMode, PlayState,
-    PlaybackCommand, PlaybackResponse, QueueTrack, RendererBroadcast, RendererHandler,
+    ActivationState, AudioQuality, BufferState, DeviceConfig, LoopMode, PlaybackCommand,
+    PlaybackResponse, PlayingState, QueueTrack, RendererBroadcast, RendererHandler,
     SessionManager,
 };
 use rand::{Rng, thread_rng};
@@ -68,7 +68,7 @@ impl TrackDurationProvider for RandomDurationProvider {
 /// Simulates a Qobuz Connect player.
 struct FakePlayer {
     // Playback state
-    state: PlayState,
+    state: PlayingState,
     position_ms: u32,
     current_track_index: Option<usize>,
 
@@ -91,7 +91,7 @@ struct FakePlayer {
 impl FakePlayer {
     fn new() -> Self {
         Self {
-            state: PlayState::Stopped,
+            state: PlayingState::Stopped,
             position_ms: 0,
             current_track_index: None,
             queue: Vec::new(),
@@ -126,7 +126,7 @@ impl FakePlayer {
     fn playback_response(&mut self) -> PlaybackResponse {
         PlaybackResponse {
             state: self.state,
-            buffer_state: BufferState::Ready,
+            buffer_state: BufferState::Ok,
             position_ms: self.position_ms,
             duration_ms: self.current_duration(),
             queue_item_id: self.current_queue_item_id(),
@@ -136,7 +136,7 @@ impl FakePlayer {
 
     /// Advance position (called by heartbeat). Returns true if state changed.
     fn tick(&mut self) -> bool {
-        if self.state != PlayState::Playing {
+        if self.state != PlayingState::Playing {
             return false;
         }
 
@@ -144,10 +144,10 @@ impl FakePlayer {
         self.position_ms += 10_000;
 
         // Check if track ended
-        if let Some(duration) = self.current_duration() {
-            if self.position_ms >= duration {
-                return self.advance_track();
-            }
+        if let Some(duration) = self.current_duration()
+            && self.position_ms >= duration
+        {
+            return self.advance_track();
         }
 
         true // State changed (position advanced)
@@ -156,18 +156,18 @@ impl FakePlayer {
     fn advance_track(&mut self) -> bool {
         let queue_len = self.queue.len();
         if queue_len == 0 {
-            self.state = PlayState::Stopped;
+            self.state = PlayingState::Stopped;
             self.position_ms = 0;
             return true;
         }
 
         let current = self.current_track_index.unwrap_or(0);
         let next = match self.loop_mode {
-            LoopMode::One => current,
-            LoopMode::All => (current + 1) % queue_len,
-            LoopMode::Off => {
+            LoopMode::RepeatOne => current,
+            LoopMode::RepeatAll => (current + 1) % queue_len,
+            LoopMode::Off | LoopMode::Unknown => {
                 if current + 1 >= queue_len {
-                    self.state = PlayState::Stopped;
+                    self.state = PlayingState::Stopped;
                     self.position_ms = 0;
                     return true;
                 }
@@ -206,14 +206,14 @@ impl RendererHandler for FakePlayer {
         }
 
         // If server specified a queue item, switch to it
-        if let Some(queue_item_id) = cmd.queue_item_id {
-            if let Some(idx) = self.find_track_index(queue_item_id as i32) {
-                self.current_track_index = Some(idx);
-            }
+        if let Some(queue_item_id) = cmd.queue_item_id
+            && let Some(idx) = self.find_track_index(queue_item_id as i32)
+        {
+            self.current_track_index = Some(idx);
         }
 
         // Start playing first track if we have a queue and not already on a track
-        if self.state == PlayState::Playing && self.current_track_index.is_none() && !self.queue.is_empty() {
+        if self.state == PlayingState::Playing && self.current_track_index.is_none() && !self.queue.is_empty() {
             self.current_track_index = Some(0);
             self.position_ms = 0;
         }
@@ -242,7 +242,7 @@ impl RendererHandler for FakePlayer {
     fn on_deactivate(&mut self, renderer_id: u64) {
         warn!(renderer_id, "Device deactivated");
         self.renderer_id = 0;
-        self.state = PlayState::Stopped;
+        self.state = PlayingState::Stopped;
     }
 
     fn on_queue_update(&mut self, tracks: Vec<QueueTrack>, version: (u64, i32)) {
@@ -263,7 +263,7 @@ impl RendererHandler for FakePlayer {
             self.current_track_index = self.find_track_index(id);
             if self.current_track_index.is_none() {
                 // Track was removed, stop playback
-                self.state = PlayState::Stopped;
+                self.state = PlayingState::Stopped;
                 self.position_ms = 0;
             }
         }
@@ -281,7 +281,7 @@ impl RendererHandler for FakePlayer {
     }
 
     fn on_heartbeat(&mut self, _renderer_id: u64) -> Option<PlaybackResponse> {
-        if self.tick() && self.state == PlayState::Playing {
+        if self.tick() && self.state == PlayingState::Playing {
             debug!(
                 position_ms = self.position_ms,
                 "Heartbeat"

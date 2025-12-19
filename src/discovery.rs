@@ -21,36 +21,27 @@ use uuid::Uuid;
 use zeroconf_tokio::prelude::*;
 use zeroconf_tokio::{MdnsService, MdnsServiceAsync, ServiceType, TxtRecord};
 
+use crate::proto::qconnect::DeviceType;
 use crate::{Error, Result};
 
 /// QConnect SDK version to advertise via mDNS.
 /// Must be >= 0.9.5 for Qobuz apps to accept the device.
 const QCONNECT_SDK_VERSION: &str = "0.9.6";
 
-/// Device type for Qobuz Connect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[repr(i32)]
-pub enum DeviceType {
-    #[default]
-    Speaker = 1,
-    SpeakerBox = 2,
-    Tv = 3,
-    SpeakerBox2 = 4,
-    Laptop = 5,
-    Phone = 6,
-    GoogleCast = 7,
-    Headphones = 8,
-    Tablet = 9,
+/// Extension trait to get mDNS string representation for DeviceType.
+pub trait DeviceTypeExt {
+    /// Returns the string representation for mDNS TXT record.
+    fn as_str(&self) -> &'static str;
 }
 
-impl DeviceType {
-    /// Returns the string representation for mDNS TXT record.
-    pub fn as_str(&self) -> &'static str {
+impl DeviceTypeExt for DeviceType {
+    fn as_str(&self) -> &'static str {
         match self {
+            DeviceType::Unknown => "UNKNOWN",
             DeviceType::Speaker => "SPEAKER",
-            DeviceType::SpeakerBox => "SPEAKERBOX",
+            DeviceType::Speakerbox => "SPEAKERBOX",
             DeviceType::Tv => "TV",
-            DeviceType::SpeakerBox2 => "SPEAKERBOX2",
+            DeviceType::Speakerbox2 => "SPEAKERBOX2",
             DeviceType::Laptop => "LAPTOP",
             DeviceType::Phone => "PHONE",
             DeviceType::GoogleCast => "GOOGLE_CAST",

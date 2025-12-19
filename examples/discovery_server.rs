@@ -11,8 +11,8 @@
 //! Run with debug: RUST_LOG=qonductor=debug cargo run --example discovery_server
 
 use qonductor::{
-    ActivationState, AudioQuality, BufferState, DeviceConfig, LoopMode, PlayState,
-    PlaybackCommand, PlaybackResponse, QueueTrack, RendererBroadcast, RendererHandler,
+    ActivationState, AudioQuality, BufferState, DeviceConfig, LoopMode, PlaybackCommand,
+    PlaybackResponse, PlayingState, QueueTrack, RendererBroadcast, RendererHandler,
     SessionManager,
 };
 use serde::Deserialize;
@@ -39,7 +39,7 @@ impl RendererHandler for LoggingHandler {
         );
         PlaybackResponse {
             state: cmd.state,
-            buffer_state: BufferState::Ready,
+            buffer_state: BufferState::Ok,
             position_ms: cmd.position_ms.unwrap_or(0),
             duration_ms: None,
             queue_item_id: None,
@@ -59,8 +59,8 @@ impl RendererHandler for LoggingHandler {
             volume: 100,
             max_quality: AudioQuality::FlacHiRes192,
             playback: PlaybackResponse {
-                state: PlayState::Stopped,
-                buffer_state: BufferState::Ready,
+                state: PlayingState::Stopped,
+                buffer_state: BufferState::Ok,
                 position_ms: 0,
                 duration_ms: None,
                 queue_item_id: None,

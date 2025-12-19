@@ -42,21 +42,3 @@ pub struct Track {
     #[serde(default)]
     pub file_url: Option<String>,
 }
-
-/// Playback state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PlayState {
-    #[default]
-    Stopped,
-    Playing,
-    Paused,
-}
-
-/// Loop/repeat mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LoopMode {
-    #[default]
-    Off,
-    RepeatOne,
-    RepeatAll,
-}

@@ -187,7 +187,7 @@ async fn main() -> qonductor::Result<()> {
 | `SessionManager` | Main entry point. Manages devices and sessions.            |
 | `DeviceConfig`   | Configuration for a discoverable device.                   |
 | `SessionEvent`   | Events from Qobuz (playback commands, queue updates, etc.) |
-| `PlayState`      | Playback state: `Playing`, `Paused`, `Stopped`             |
+| `PlayingState`   | Playback state: `Playing`, `Paused`, `Stopped`             |
 
 ## How It Works
 

@@ -19,10 +19,11 @@ use tracing::{debug, info, warn};
 
 use crate::discovery::{AudioQuality, DeviceConfig, SessionInfo};
 use crate::proto::qconnect::{
-    CtrlSrvrAskForQueueState, CtrlSrvrAskForRendererState, CtrlSrvrSetActiveRenderer, Position,
-    QConnectMessage, QConnectMessageType, QueueRendererState, QueueVersion,
-    RndrSrvrFileAudioQualityChanged, RndrSrvrMaxAudioQualityChanged, RndrSrvrStateUpdated,
-    RndrSrvrVolumeChanged, RndrSrvrVolumeMuted,
+    BufferState, CtrlSrvrAskForQueueState, CtrlSrvrAskForRendererState,
+    CtrlSrvrSetActiveRenderer, LoopMode, PlayingState, Position, QConnectMessage,
+    QConnectMessageType, QueueRendererState, QueueVersion, RndrSrvrFileAudioQualityChanged,
+    RndrSrvrMaxAudioQualityChanged, RndrSrvrStateUpdated, RndrSrvrVolumeChanged,
+    RndrSrvrVolumeMuted,
 };
 use crate::transport::{Transport, TransportWriter};
 use crate::{Error, Result};
@@ -37,7 +38,7 @@ use crate::{Error, Result};
 #[derive(Debug, Clone)]
 pub struct PlaybackResponse {
     /// Current playback state (playing, paused, stopped).
-    pub state: PlayState,
+    pub state: PlayingState,
     /// Buffer state (buffering, ready, empty).
     pub buffer_state: BufferState,
     /// Current position in milliseconds.
@@ -54,7 +55,7 @@ pub struct PlaybackResponse {
 #[derive(Debug, Clone)]
 pub struct PlaybackCommand {
     /// Requested playback state.
-    pub state: PlayState,
+    pub state: PlayingState,
     /// Requested position (seek), if any.
     pub position_ms: Option<u32>,
     /// Current queue item ID to play (if specified).
@@ -90,7 +91,7 @@ pub struct ActivationState {
 ///
 /// ```ignore
 /// struct MyPlayer {
-///     state: PlayState,
+///     state: PlayingState,
 ///     position_ms: u32,
 ///     volume: u32,
 /// }
@@ -104,7 +105,7 @@ pub struct ActivationState {
 ///         // Return value is automatically sent to server
 ///         PlaybackResponse {
 ///             state: self.state,
-///             buffer_state: BufferState::Ready,
+///             buffer_state: BufferState::Ok,
 ///             position_ms: self.position_ms,
 ///             duration_ms: Some(180_000),
 ///             queue_item_id: Some(1),
@@ -185,7 +186,7 @@ pub enum RendererBroadcast {
     /// Renderer state broadcast (from any renderer).
     RendererStateUpdated {
         renderer_id: u64,
-        state: PlayState,
+        state: PlayingState,
         position_ms: u32,
         duration_ms: u32,
         queue_index: u32,
@@ -211,83 +212,6 @@ pub enum RendererBroadcast {
     },
 }
 
-/// Playback state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayState {
-    Stopped,
-    Playing,
-    Paused,
-}
-
-impl From<i32> for PlayState {
-    fn from(value: i32) -> Self {
-        match value {
-            1 => PlayState::Stopped,
-            2 => PlayState::Playing,
-            3 => PlayState::Paused,
-            _ => PlayState::Stopped,
-        }
-    }
-}
-
-impl From<PlayState> for i32 {
-    fn from(value: PlayState) -> Self {
-        match value {
-            PlayState::Stopped => 1,
-            PlayState::Playing => 2,
-            PlayState::Paused => 3,
-        }
-    }
-}
-
-/// Buffer state for renderer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BufferState {
-    Empty,
-    Buffering,
-    Ready,
-}
-
-impl From<i32> for BufferState {
-    fn from(value: i32) -> Self {
-        match value {
-            1 => BufferState::Empty,
-            2 => BufferState::Buffering,
-            3 => BufferState::Ready,
-            _ => BufferState::Empty,
-        }
-    }
-}
-
-impl From<BufferState> for i32 {
-    fn from(value: BufferState) -> Self {
-        match value {
-            BufferState::Empty => 1,
-            BufferState::Buffering => 2,
-            BufferState::Ready => 3,
-        }
-    }
-}
-
-/// Loop/repeat mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LoopMode {
-    #[default]
-    Off,
-    One,
-    All,
-}
-
-impl From<i32> for LoopMode {
-    fn from(value: i32) -> Self {
-        match value {
-            1 => LoopMode::Off,
-            2 => LoopMode::One,
-            3 => LoopMode::All,
-            _ => LoopMode::Off,
-        }
-    }
-}
 
 /// A track in the queue.
 #[derive(Debug, Clone)]
@@ -826,8 +750,8 @@ impl SessionRunner {
                 if let Some(ss) = msg.srvr_rndr_set_state {
                     let state = ss
                         .playing_state
-                        .map(PlayState::from)
-                        .unwrap_or(PlayState::Stopped);
+                        .and_then(|i| PlayingState::try_from(i).ok())
+                        .unwrap_or(PlayingState::Stopped);
                     let position_ms = ss.current_position;
                     let queue_item_id =
                         ss.current_queue_item.as_ref().and_then(|q| q.queue_item_id);
@@ -936,7 +860,10 @@ impl SessionRunner {
             // SrvrCtrlLoopModeSet (97)
             t if t == QConnectMessageType::MessageTypeSrvrCtrlLoopModeSet as i32 => {
                 if let Some(lm) = msg.srvr_ctrl_loop_mode_set {
-                    let mode = lm.mode.map(LoopMode::from).unwrap_or_default();
+                    let mode = lm
+                        .mode
+                        .and_then(|i| LoopMode::try_from(i).ok())
+                        .unwrap_or_default();
 
                     // Call handler
                     {
@@ -1006,8 +933,8 @@ impl SessionRunner {
                     if let Some(state) = rsu.state {
                         let play_state = state
                             .playing_state
-                            .map(PlayState::from)
-                            .unwrap_or(PlayState::Stopped);
+                            .and_then(|i| PlayingState::try_from(i).ok())
+                            .unwrap_or(PlayingState::Stopped);
                         let position_ms = state.current_position.and_then(|p| p.value).unwrap_or(0);
                         let duration_ms = state.duration.unwrap_or(0);
                         let queue_index = state.current_queue_index.unwrap_or(0);
