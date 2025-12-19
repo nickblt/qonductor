@@ -37,7 +37,7 @@ pub(crate) mod qconnect;
 pub(crate) mod transport;
 
 // Re-export main public API
-pub use manager::SessionManager;
+pub use manager::{SessionManager, SessionManagerHandle};
 pub use qconnect::{BufferState, LoopMode, PlayState, QueueTrack, SessionEvent};
 pub use discovery::{DeviceConfig, DeviceType, AudioQuality};
 

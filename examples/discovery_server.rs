@@ -147,6 +147,22 @@ async fn main() {
                     SessionEvent::ShuffleModeChanged { enabled } => {
                         println!("Shuffle mode changed: {}", enabled);
                     }
+                    // Broadcasts - informational only
+                    SessionEvent::RendererStateUpdated { renderer_id, state, position_ms, .. } => {
+                        println!("Renderer state: id={} state={:?} pos={}ms", renderer_id, state, position_ms);
+                    }
+                    SessionEvent::VolumeBroadcast { renderer_id, volume } => {
+                        println!("Volume broadcast: renderer={} volume={}", renderer_id, volume);
+                    }
+                    SessionEvent::VolumeMutedBroadcast { renderer_id, muted } => {
+                        println!("Mute broadcast: renderer={} muted={}", renderer_id, muted);
+                    }
+                    SessionEvent::MaxAudioQualityBroadcast { renderer_id, quality } => {
+                        println!("Max quality broadcast: renderer={} quality={:?}", renderer_id, quality);
+                    }
+                    SessionEvent::FileAudioQualityBroadcast { renderer_id, sample_rate_hz } => {
+                        println!("File quality broadcast: renderer={} rate={}Hz", renderer_id, sample_rate_hz);
+                    }
                 }
             }
             _ = signal::ctrl_c() => {

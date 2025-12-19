@@ -82,6 +82,24 @@ impl AudioQuality {
     }
 }
 
+impl From<i32> for AudioQuality {
+    fn from(value: i32) -> Self {
+        match value {
+            5 => AudioQuality::Mp3,
+            6 => AudioQuality::FlacLossless,
+            7 => AudioQuality::FlacHiRes96,
+            27 => AudioQuality::FlacHiRes192,
+            _ => AudioQuality::FlacHiRes192, // Default to highest quality
+        }
+    }
+}
+
+impl From<AudioQuality> for i32 {
+    fn from(value: AudioQuality) -> Self {
+        value as i32
+    }
+}
+
 /// Configuration for a Qobuz Connect device.
 #[derive(Debug, Clone)]
 pub struct DeviceConfig {

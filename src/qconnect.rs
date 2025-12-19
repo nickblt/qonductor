@@ -7,10 +7,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::discovery::{DeviceConfig, SessionInfo};
+use crate::discovery::{AudioQuality, DeviceConfig, SessionInfo};
 use crate::proto::qconnect::{
     Position, QConnectBatch, QConnectMessage, QConnectMessageType, QueueRendererState,
-    RndrSrvrStateUpdated,
+    RndrSrvrFileAudioQualityChanged, RndrSrvrMaxAudioQualityChanged, RndrSrvrStateUpdated,
+    RndrSrvrVolumeChanged, RndrSrvrVolumeMuted,
 };
 use crate::transport::{IncomingMessage, Transport};
 use crate::{Error, Result};
@@ -61,6 +62,15 @@ pub enum SessionEvent {
         version: (u64, i32),
     },
 
+    /// Renderer state updated (response to request_renderer_state).
+    RendererStateUpdated {
+        renderer_id: u64,
+        state: PlayState,
+        position_ms: u32,
+        duration_ms: u32,
+        queue_index: u32,
+    },
+
     /// Server requests playback state change.
     PlaybackCommand {
         renderer_id: u64,
@@ -76,6 +86,29 @@ pub enum SessionEvent {
 
     /// Shuffle mode changed.
     ShuffleModeChanged { enabled: bool },
+
+    // ========================================================================
+    // Broadcast events (informational - renderer should NOT respond to these)
+    // ========================================================================
+
+    /// Volume changed broadcast (from another renderer).
+    VolumeBroadcast { renderer_id: u64, volume: u32 },
+
+    /// Volume muted broadcast (from another renderer).
+    VolumeMutedBroadcast { renderer_id: u64, muted: bool },
+
+    /// Max audio quality changed broadcast (from another renderer).
+    MaxAudioQualityBroadcast {
+        renderer_id: u64,
+        quality: AudioQuality,
+    },
+
+    /// File audio quality changed broadcast (from another renderer).
+    /// Sample rate is in Hz (e.g., 44100, 96000, 192000).
+    FileAudioQualityBroadcast {
+        renderer_id: u64,
+        sample_rate_hz: u32,
+    },
 }
 
 /// Playback state.
@@ -177,6 +210,34 @@ pub(crate) enum SessionCommand {
         queue_item_id: Option<i32>,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Report volume to the server.
+    ReportVolume {
+        volume: u32,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Report volume muted state to the server.
+    ReportVolumeMuted {
+        muted: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Report max audio quality capability to the server.
+    ReportMaxAudioQuality {
+        quality: AudioQuality,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Report actual file audio quality (sample rate in Hz) to the server.
+    ReportFileAudioQuality {
+        sample_rate_hz: u32,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Request current queue state from the server.
+    RequestQueueState {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Request current renderer state from the server.
+    RequestRendererState {
+        reply: oneshot::Sender<Result<()>>,
+    },
     /// Shutdown the session.
     #[allow(dead_code)] // Part of the API
     Shutdown,
@@ -276,6 +337,110 @@ impl SessionHandle {
             .map_err(|_| Error::Protocol("Session closed".to_string()))?
     }
 
+    /// Report volume to the server.
+    ///
+    /// Call this after receiving a volume command or during activation handshake.
+    pub async fn report_volume(&self, volume: u32) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SessionCommand::ReportVolume {
+                volume,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?
+    }
+
+    /// Report volume muted state to the server.
+    ///
+    /// Call this during activation handshake or when mute state changes.
+    pub async fn report_volume_muted(&self, muted: bool) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SessionCommand::ReportVolumeMuted {
+                muted,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?
+    }
+
+    /// Report max audio quality capability to the server.
+    ///
+    /// Call this during activation handshake to inform the server of our capabilities.
+    pub async fn report_max_audio_quality(&self, quality: AudioQuality) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SessionCommand::ReportMaxAudioQuality {
+                quality,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?
+    }
+
+    /// Report actual file audio quality (sample rate) to the server.
+    ///
+    /// Call this after loading a track to report the actual sample rate in Hz
+    /// (e.g., 44100, 96000, 192000).
+    pub async fn report_file_audio_quality(&self, sample_rate_hz: u32) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SessionCommand::ReportFileAudioQuality {
+                sample_rate_hz,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?
+    }
+
+    /// Request current queue state from the server.
+    ///
+    /// The server will respond with a `QueueUpdated` event containing the current queue.
+    pub async fn request_queue_state(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SessionCommand::RequestQueueState { reply: reply_tx })
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?
+    }
+
+    /// Request current renderer state from the server.
+    ///
+    /// The server will respond with a `RendererStateUpdated` event containing
+    /// the current playback state, position, and queue index.
+    pub async fn request_renderer_state(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SessionCommand::RequestRendererState { reply: reply_tx })
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Error::Protocol("Session closed".to_string()))?
+    }
+
     /// Disconnect the session.
     ///
     /// This closes the WebSocket connection and stops the session runner.
@@ -304,11 +469,10 @@ impl SessionHandle {
 #[derive(Default)]
 struct SessionState {
     /// Session ID from server.
+    #[allow(dead_code)] // May be used for future features
     session_id: Option<u64>,
     /// Session UUID (also used as queue UUID).
     session_uuid: Option<[u8; 16]>,
-    /// Whether we've requested initial state.
-    requested_state: bool,
 }
 
 /// The session runner that handles WebSocket communication.
@@ -370,6 +534,30 @@ impl SessionRunner {
                             let result = self.do_report_playback_state(renderer_id, state, position_ms, queue_item_id).await;
                             let _ = reply.send(result);
                         }
+                        Some(SessionCommand::ReportVolume { volume, reply }) => {
+                            let result = self.do_report_volume(volume).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ReportVolumeMuted { muted, reply }) => {
+                            let result = self.do_report_volume_muted(muted).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ReportMaxAudioQuality { quality, reply }) => {
+                            let result = self.do_report_max_audio_quality(quality).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::ReportFileAudioQuality { sample_rate_hz, reply }) => {
+                            let result = self.do_report_file_audio_quality(sample_rate_hz).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::RequestQueueState { reply }) => {
+                            let result = self.do_request_queue_state().await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SessionCommand::RequestRendererState { reply }) => {
+                            let result = self.do_request_renderer_state().await;
+                            let _ = reply.send(result);
+                        }
                         Some(SessionCommand::Disconnect) => {
                             info!("Disconnect command received");
                             let _ = self.ws.close().await;
@@ -426,6 +614,103 @@ impl SessionRunner {
         };
 
         self.ws.send_batch(batch).await
+    }
+
+    /// Report volume to server.
+    async fn do_report_volume(&mut self, volume: u32) -> Result<()> {
+        debug!(volume, "TX: ReportVolume");
+
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeRndrSrvrVolumeChanged as i32),
+            rndr_srvr_volume_changed: Some(RndrSrvrVolumeChanged {
+                volume: Some(volume),
+            }),
+            ..Default::default()
+        };
+
+        let batch = QConnectBatch {
+            messages_time: Some(now_ms()),
+            messages_id: None,
+            messages: vec![msg],
+        };
+
+        self.ws.send_batch(batch).await
+    }
+
+    /// Report volume muted state to server.
+    async fn do_report_volume_muted(&mut self, muted: bool) -> Result<()> {
+        debug!(muted, "TX: ReportVolumeMuted");
+
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeRndrSrvrVolumeMuted as i32),
+            rndr_srvr_volume_muted: Some(RndrSrvrVolumeMuted { value: Some(muted) }),
+            ..Default::default()
+        };
+
+        let batch = QConnectBatch {
+            messages_time: Some(now_ms()),
+            messages_id: None,
+            messages: vec![msg],
+        };
+
+        self.ws.send_batch(batch).await
+    }
+
+    /// Report max audio quality capability to server.
+    async fn do_report_max_audio_quality(&mut self, quality: AudioQuality) -> Result<()> {
+        debug!(?quality, "TX: ReportMaxAudioQuality");
+
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeRndrSrvrMaxAudioQualityChanged as i32),
+            rndr_srvr_max_audio_quality_changed: Some(RndrSrvrMaxAudioQualityChanged {
+                value: Some(quality.into()),
+            }),
+            ..Default::default()
+        };
+
+        let batch = QConnectBatch {
+            messages_time: Some(now_ms()),
+            messages_id: None,
+            messages: vec![msg],
+        };
+
+        self.ws.send_batch(batch).await
+    }
+
+    /// Report actual file audio quality (sample rate in Hz) to server.
+    async fn do_report_file_audio_quality(&mut self, sample_rate_hz: u32) -> Result<()> {
+        debug!(sample_rate_hz, "TX: ReportFileAudioQuality");
+
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeRndrSrvrFileAudioQualityChanged as i32),
+            rndr_srvr_file_audio_quality_changed: Some(RndrSrvrFileAudioQualityChanged {
+                value: Some(sample_rate_hz as i32),
+            }),
+            ..Default::default()
+        };
+
+        let batch = QConnectBatch {
+            messages_time: Some(now_ms()),
+            messages_id: None,
+            messages: vec![msg],
+        };
+
+        self.ws.send_batch(batch).await
+    }
+
+    /// Request queue state from server.
+    async fn do_request_queue_state(&mut self) -> Result<()> {
+        // Use session_uuid as queue_uuid (they're the same in QConnect)
+        let queue_uuid = self.state.session_uuid.unwrap_or(self.device_uuid);
+        debug!("TX: RequestQueueState");
+        self.ws.ask_for_queue_state(&queue_uuid, None).await
+    }
+
+    /// Request renderer state from server.
+    async fn do_request_renderer_state(&mut self) -> Result<()> {
+        let session_id = self.state.session_id.unwrap_or(0);
+        debug!("TX: RequestRendererState");
+        self.ws.ask_for_renderer_state(session_id).await
     }
 
     /// Handle an incoming WebSocket message.
@@ -530,19 +815,8 @@ impl SessionRunner {
                         self.state.session_uuid = Some(uuid);
                     }
 
-                    // Request initial state if we haven't already
-                    if !self.state.requested_state {
-                        self.state.requested_state = true;
-
-                        // TODO: Testing without queue/renderer state requests
-                        // debug!("Requesting queue state");
-                        // self.ws
-                        //     .ask_for_queue_state(&self.device_uuid, None)
-                        //     .await?;
-
-                        // debug!("Requesting renderer state");
-                        // self.ws.ask_for_renderer_state(sid).await?;
-                    }
+                    // Note: Queue state is now requested by the player via request_queue_state()
+                    // after receiving DeviceActive event.
                 }
             }
 
@@ -649,6 +923,36 @@ impl SessionRunner {
                 }
             }
 
+            // SrvrCtrlVolumeChanged (87) - Broadcast
+            t if t == QConnectMessageType::MessageTypeSrvrCtrlVolumeChanged as i32 => {
+                if let Some(vc) = msg.srvr_ctrl_volume_changed {
+                    let rid = vc.renderer_id.unwrap_or(0);
+                    let volume = vc.volume.unwrap_or(0);
+                    debug!(renderer_id = rid, volume, "RX: VolumeChanged (broadcast)");
+
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::VolumeBroadcast {
+                            renderer_id: rid,
+                            volume,
+                        })
+                        .await;
+                }
+            }
+
+            // SrvrCtrlShuffleModeSet (96)
+            t if t == QConnectMessageType::MessageTypeSrvrCtrlShuffleModeSet as i32 => {
+                if let Some(sm) = msg.srvr_ctrl_shuffle_mode_set {
+                    let enabled = sm.shuffle_on.unwrap_or(false);
+                    debug!(enabled, "RX: ShuffleModeSet");
+
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::ShuffleModeChanged { enabled })
+                        .await;
+                }
+            }
+
             // SrvrCtrlLoopModeSet (97)
             t if t == QConnectMessageType::MessageTypeSrvrCtrlLoopModeSet as i32 => {
                 if let Some(lm) = msg.srvr_ctrl_loop_mode_set {
@@ -662,12 +966,97 @@ impl SessionRunner {
                 }
             }
 
+            // SrvrCtrlVolumeMuted (98) - Broadcast
+            t if t == QConnectMessageType::MessageTypeSrvrCtrlVolumeMuted as i32 => {
+                if let Some(vm) = msg.srvr_ctrl_volume_muted {
+                    let rid = vm.renderer_id.unwrap_or(0);
+                    let muted = vm.value.unwrap_or(false);
+                    debug!(renderer_id = rid, muted, "RX: VolumeMuted (broadcast)");
+
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::VolumeMutedBroadcast {
+                            renderer_id: rid,
+                            muted,
+                        })
+                        .await;
+                }
+            }
+
+            // SrvrCtrlMaxAudioQualityChanged (99) - Broadcast
+            t if t == QConnectMessageType::MessageTypeSrvrCtrlMaxAudioQualityChanged as i32 => {
+                if let Some(mq) = msg.srvr_ctrl_max_audio_quality_changed {
+                    let quality = mq.max_audio_quality.map(AudioQuality::from).unwrap_or_default();
+                    debug!(?quality, "RX: MaxAudioQualityChanged (broadcast)");
+
+                    // This broadcast doesn't include renderer_id; applies to active renderer
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::MaxAudioQualityBroadcast {
+                            renderer_id: self.renderer_id,
+                            quality,
+                        })
+                        .await;
+                }
+            }
+
+            // SrvrCtrlFileAudioQualityChanged (100) - Broadcast
+            t if t == QConnectMessageType::MessageTypeSrvrCtrlFileAudioQualityChanged as i32 => {
+                if let Some(fq) = msg.srvr_ctrl_file_audio_quality_changed {
+                    // file_audio_quality is the sample rate in Hz (e.g., 44100, 96000)
+                    let sample_rate_hz = fq.file_audio_quality.unwrap_or(0) as u32;
+                    debug!(sample_rate_hz, "RX: FileAudioQualityChanged (broadcast)");
+
+                    // This broadcast doesn't include renderer_id; applies to active renderer
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::FileAudioQualityBroadcast {
+                            renderer_id: self.renderer_id,
+                            sample_rate_hz,
+                        })
+                        .await;
+                }
+            }
+
             // SrvrCtrlRendererStateUpdated (82)
             t if t == QConnectMessageType::MessageTypeSrvrCtrlRendererStateUpdated as i32 => {
                 if let Some(rsu) = msg.srvr_ctrl_renderer_state_updated {
                     let rid = rsu.renderer_id.unwrap_or(0);
-                    debug!(renderer_id = rid, "RX: RendererStateUpdated");
-                    // Could emit an event here if needed
+
+                    if let Some(state) = rsu.state {
+                        let play_state = state
+                            .playing_state
+                            .map(PlayState::from)
+                            .unwrap_or(PlayState::Stopped);
+                        let position_ms = state
+                            .current_position
+                            .and_then(|p| p.value)
+                            .unwrap_or(0);
+                        let duration_ms = state.duration.unwrap_or(0);
+                        let queue_index = state.current_queue_index.unwrap_or(0);
+
+                        debug!(
+                            renderer_id = rid,
+                            ?play_state,
+                            position_ms,
+                            duration_ms,
+                            queue_index,
+                            "RX: RendererStateUpdated"
+                        );
+
+                        let _ = self
+                            .event_tx
+                            .send(SessionEvent::RendererStateUpdated {
+                                renderer_id: rid,
+                                state: play_state,
+                                position_ms,
+                                duration_ms,
+                                queue_index,
+                            })
+                            .await;
+                    } else {
+                        debug!(renderer_id = rid, "RX: RendererStateUpdated (no state)");
+                    }
                 }
             }
 
