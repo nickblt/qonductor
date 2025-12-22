@@ -18,16 +18,12 @@ use tokio_tungstenite::{
 };
 use tracing::{debug, trace, warn};
 
+use crate::config::AudioQuality;
 use crate::proto::qconnect::{
     Authenticate, CtrlSrvrJoinSession, DeviceCapabilities, DeviceInfo, DeviceType, Payload,
     QCloudMessageType, QConnectBatch, QConnectMessage, QConnectMessageType, Subscribe,
 };
-use crate::config::AudioQuality;
 use crate::{Error, Result};
-
-/// Default QConnect WebSocket URL.
-#[allow(dead_code)] // Useful constant for future use
-pub const DEFAULT_WS_URL: &str = "wss://play.qobuz.com/ws";
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 

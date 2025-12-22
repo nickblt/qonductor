@@ -5,7 +5,7 @@
 //! ## Quick Start
 //!
 //! ```ignore
-//! use qonductor::{SessionManager, DeviceConfig, SessionEvent};
+//! use qonductor::{SessionManager, DeviceConfig, SessionEvent, ActivationState, PlaybackResponse};
 //!
 //! #[tokio::main]
 //! async fn main() -> qonductor::Result<()> {
@@ -16,8 +16,12 @@
 //!
 //!     while let Some(event) = events.recv().await {
 //!         match event {
-//!             SessionEvent::PlaybackCommand { renderer_id, state, .. } => {
-//!                 println!("Playback command: {:?}", state);
+//!             SessionEvent::PlaybackCommand { renderer_id, cmd, respond } => {
+//!                 println!("Playback command: {:?}", cmd);
+//!                 respond.send(PlaybackResponse { /* ... */ });
+//!             }
+//!             SessionEvent::Activate { renderer_id, respond } => {
+//!                 respond.send(ActivationState { /* ... */ });
 //!             }
 //!             _ => {}
 //!         }
@@ -38,10 +42,9 @@ pub(crate) mod qconnect;
 pub(crate) mod transport;
 
 // Re-export main public API
-pub use manager::{SessionManager, SessionManagerHandle};
+pub use manager::SessionManager;
 pub use qconnect::{
-    ActivationState, PlaybackCommand, PlaybackResponse, QueueTrack, RendererBroadcast,
-    RendererHandler,
+    ActivationState, PlaybackCommand, PlaybackResponse, QueueTrack, Responder, SessionEvent,
 };
 pub use proto::qconnect::{BufferState, DeviceType, LoopMode, PlayingState};
 pub use config::{AudioQuality, DeviceConfig};

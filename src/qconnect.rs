@@ -1,20 +1,18 @@
 //! High-level session management for Qobuz Connect.
 //!
-//! This module provides:
-//! - `RendererHandler` trait for handling server commands with automatic responses
-//! - `RendererBroadcast` enum for informational events (no response needed)
+//! This module provides a stream-based event API:
+//! - `SessionEvent` enum for all events from the session
+//! - `Responder<T>` for sending required responses back to the server
 //!
-//! The handler trait ensures protocol compliance by requiring return values
-//! that are automatically sent to the server.
+//! Events are received via an mpsc channel. Commands that require responses
+//! include a `Responder` that must be used to send the response.
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 
-use futures::StreamExt;
 use futures::stream::Stream;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, interval};
+use futures::StreamExt;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
 
 use crate::config::{DeviceConfig, SessionInfo};
@@ -25,7 +23,7 @@ use crate::proto::qconnect::{
     RndrSrvrStateUpdated, RndrSrvrVolumeChanged, RndrSrvrVolumeMuted,
 };
 use crate::transport::{Transport, TransportWriter};
-use crate::{Error, Result};
+use crate::Result;
 
 // ============================================================================
 // Handler Types
@@ -79,92 +77,132 @@ pub struct ActivationState {
 }
 
 // ============================================================================
-// RendererHandler Trait
+// Responder
 // ============================================================================
 
-/// Handler for renderer commands from the Qobuz server.
+/// A responder for sending required responses back to the server.
 ///
-/// Implement this trait to handle playback commands. Return values are
-/// automatically sent to the server, ensuring protocol compliance.
+/// Commands that require a response include a `Responder`. You must call
+/// `.send()` to provide the response, or the session will hang waiting.
 ///
 /// # Example
 ///
 /// ```ignore
-/// struct MyPlayer {
-///     state: PlayingState,
-///     position_ms: u32,
-///     volume: u32,
-/// }
-///
-/// impl RendererHandler for MyPlayer {
-///     fn on_playback_command(&mut self, _rid: u64, cmd: PlaybackCommand) -> PlaybackResponse {
-///         self.state = cmd.state;
-///         if let Some(pos) = cmd.position_ms {
-///             self.position_ms = pos;
-///         }
-///         // Return value is automatically sent to server
-///         PlaybackResponse {
-///             state: self.state,
-///             buffer_state: BufferState::Ok,
-///             position_ms: self.position_ms,
-///             duration_ms: Some(180_000),
-///             queue_item_id: Some(1),
-///         }
+/// match event {
+///     SessionEvent::PlaybackCommand { cmd, respond, .. } => {
+///         let response = handle_playback(cmd);
+///         respond.send(response);  // Required!
 ///     }
-///     // ... other methods
+///     _ => {}
 /// }
 /// ```
-pub trait RendererHandler: Send + 'static {
-    /// Server commands play/pause/seek.
+#[must_use = "call .send() to respond or the session will hang"]
+pub struct Responder<T> {
+    tx: oneshot::Sender<T>,
+}
+
+impl<T> Responder<T> {
+    /// Create a new responder (internal use).
+    pub(crate) fn new(tx: oneshot::Sender<T>) -> Self {
+        Self { tx }
+    }
+
+    /// Send the response.
     ///
-    /// Return the new playback state to report back to the server.
-    fn on_playback_command(&mut self, renderer_id: u64, cmd: PlaybackCommand) -> PlaybackResponse;
-
-    /// Server commands volume change.
-    ///
-    /// Return the actual volume to report back (may differ from requested).
-    fn on_volume_command(&mut self, renderer_id: u64, volume: u32) -> u32;
-
-    /// Device became active renderer.
-    ///
-    /// Return the initial state for the activation handshake.
-    fn on_activate(&mut self, renderer_id: u64) -> ActivationState;
-
-    /// Device was deactivated.
-    fn on_deactivate(&mut self, renderer_id: u64);
-
-    /// Queue updated from server.
-    fn on_queue_update(&mut self, tracks: Vec<QueueTrack>, version: (u64, i32));
-
-    /// Loop mode changed.
-    fn on_loop_mode(&mut self, mode: LoopMode);
-
-    /// Shuffle mode changed.
-    fn on_shuffle_mode(&mut self, enabled: bool);
-
-    /// Called every ~10 seconds for heartbeat while playing.
-    ///
-    /// Return `Some(state)` to send a position update, or `None` to skip.
-    fn on_heartbeat(&mut self, renderer_id: u64) -> Option<PlaybackResponse>;
-
-    /// Called when receiving state from another active renderer before we become active.
-    ///
-    /// Use this to restore playback position when taking over from another renderer.
-    /// The position and queue index represent where the previous renderer was playing.
-    fn on_restore_state(&mut self, position_ms: u32, queue_index: Option<u32>);
+    /// This consumes the responder. The session runner will receive
+    /// the response and send it to the server.
+    pub fn send(self, value: T) {
+        let _ = self.tx.send(value);
+    }
 }
 
 // ============================================================================
-// Broadcast Events (informational only - no response needed)
+// Session Events
 // ============================================================================
 
-/// Informational events from a Qobuz Connect session.
-///
-/// These are broadcast events that do NOT require a response.
-/// Handle them for UI updates or logging, but the library handles
-/// all protocol responses automatically via [`RendererHandler`].
+/// A track in the queue.
 #[derive(Debug, Clone)]
-pub enum RendererBroadcast {
+pub struct QueueTrack {
+    pub track_id: u64,
+    pub queue_item_id: u64,
+}
+
+/// Events from a Qobuz Connect session.
+///
+/// Receive these via the event channel returned from `SessionManager::start()`.
+///
+/// Events with a `respond` field require a response - call `respond.send(value)`
+/// to provide the response. Events without a `respond` field are informational.
+///
+/// # Example
+///
+/// ```ignore
+/// while let Some(event) = events.recv().await {
+///     match event {
+///         // Commands - must respond
+///         SessionEvent::PlaybackCommand { renderer_id, cmd, respond } => {
+///             let response = my_player.handle_playback(cmd);
+///             respond.send(response);
+///         }
+///         SessionEvent::Activate { renderer_id, respond } => {
+///             respond.send(ActivationState { ... });
+///         }
+///
+///         // Events - no response needed
+///         SessionEvent::QueueUpdated { tracks, .. } => {
+///             my_player.queue = tracks;
+///         }
+///         SessionEvent::Connected => println!("Connected!"),
+///
+///         _ => {}
+///     }
+/// }
+/// ```
+pub enum SessionEvent {
+    // === Commands (require response) ===
+    /// Server commands play/pause/seek. Must respond with `PlaybackResponse`.
+    PlaybackCommand {
+        renderer_id: u64,
+        cmd: PlaybackCommand,
+        respond: Responder<PlaybackResponse>,
+    },
+
+    /// Device became active renderer. Must respond with `ActivationState`.
+    Activate {
+        renderer_id: u64,
+        respond: Responder<ActivationState>,
+    },
+
+    /// Heartbeat while playing. Respond with `Some(PlaybackResponse)` to send
+    /// a position update, or `None` to skip.
+    Heartbeat {
+        renderer_id: u64,
+        respond: Responder<Option<PlaybackResponse>>,
+    },
+
+    // === Events (no response needed) ===
+    /// Device was deactivated.
+    Deactivated { renderer_id: u64 },
+
+    /// Queue updated from server.
+    QueueUpdated {
+        tracks: Vec<QueueTrack>,
+        version: (u64, i32),
+    },
+
+    /// Loop mode changed.
+    LoopModeChanged { mode: LoopMode },
+
+    /// Shuffle mode changed.
+    ShuffleModeChanged { enabled: bool },
+
+    /// Restore state from another renderer before becoming active.
+    RestoreState {
+        position_ms: u32,
+        queue_index: Option<u32>,
+    },
+
+    // === Broadcasts (informational) ===
     /// WebSocket connected successfully.
     Connected,
 
@@ -208,155 +246,62 @@ pub enum RendererBroadcast {
     MaxAudioQualityBroadcast { renderer_id: u64, quality: i32 },
 
     /// File audio quality changed broadcast.
-    /// Sample rate is in Hz (e.g., 44100, 96000, 192000).
     FileAudioQualityBroadcast {
         renderer_id: u64,
         sample_rate_hz: u32,
     },
+
+    /// Session closed (WebSocket disconnected or error).
+    SessionClosed { device_uuid: [u8; 16] },
 }
 
-/// A track in the queue.
-#[derive(Debug, Clone)]
-pub struct QueueTrack {
-    pub track_id: u64,
-    pub queue_item_id: u64,
-}
-
-// ============================================================================
-// Actor Pattern: Commands and Handle
-// ============================================================================
-
-/// Commands sent from SessionHandle to SessionRunner.
+/// Connect to Qobuz WebSocket and spawn a session runner task.
 ///
-/// Note: Report commands are no longer needed - the handler's return values
-/// are automatically sent by the SessionRunner.
-pub(crate) enum SessionCommand {
-    /// Request current queue state from the server.
-    RequestQueueState,
-    /// Request current renderer state from the server.
-    RequestRendererState,
-    /// Shutdown the session.
-    #[allow(dead_code)] // Part of the API
-    Shutdown,
-    /// Disconnect the session (e.g., when we lose active status).
-    Disconnect,
-}
+/// The session runs until the WebSocket closes or an error occurs.
+/// Events are sent to the provided `event_tx` channel.
+pub(crate) async fn spawn_session(
+    session_info: &SessionInfo,
+    device_config: &DeviceConfig,
+    event_tx: mpsc::Sender<SessionEvent>,
+) -> Result<()> {
+    debug!(
+        session_id = %session_info.session_id,
+        device = %device_config.friendly_name,
+        "Connecting session"
+    );
 
-/// Type alias for the shared handler.
-pub(crate) type SharedHandler = Arc<Mutex<dyn RendererHandler>>;
+    // Connect and set up the WebSocket
+    let mut transport =
+        Transport::connect(&session_info.ws_endpoint, &session_info.ws_jwt).await?;
+    transport.subscribe_default().await?;
+    transport
+        .join_session(&device_config.device_uuid, &device_config.friendly_name)
+        .await?;
 
-/// Handle to a running session.
-///
-/// This is a lightweight handle that communicates with the session runner
-/// via channels. The actual WebSocket handling runs in a spawned task.
-pub(crate) struct SessionHandle {
-    #[allow(dead_code)] // Part of the API
-    session_id: String,
-    command_tx: mpsc::Sender<SessionCommand>,
-    #[allow(dead_code)] // Kept alive to keep task running; used by shutdown()
-    task: JoinHandle<()>,
-}
+    // Split into reader/writer
+    let (reader, writer) = transport.split();
+    let reader = Box::pin(reader.into_stream());
 
-impl SessionHandle {
-    /// Connect to Qobuz WebSocket and spawn the session runner.
-    pub async fn connect(
-        session_info: &SessionInfo,
-        device_config: &DeviceConfig,
-        handler: SharedHandler,
-        broadcast_tx: mpsc::Sender<RendererBroadcast>,
-        on_disconnect: impl Fn() + Send + 'static,
-    ) -> Result<Self> {
-        debug!(
-            session_id = %session_info.session_id,
-            device = %device_config.friendly_name,
-            "Connecting session"
-        );
+    let _ = event_tx.send(SessionEvent::Connected).await;
 
-        // Connect and set up the WebSocket
-        let mut transport =
-            Transport::connect(&session_info.ws_endpoint, &session_info.ws_jwt).await?;
-        transport.subscribe_default().await?;
-        transport
-            .join_session(&device_config.device_uuid, &device_config.friendly_name)
-            .await?;
+    // Create and spawn the runner
+    let runner = SessionRunner {
+        session_id: session_info.session_id.clone(),
+        reader,
+        writer,
+        device_uuid: device_config.device_uuid,
+        device_name: device_config.friendly_name.clone(),
+        renderer_id: 0,
+        is_active: false,
+        event_tx,
+        state: SessionState::default(),
+    };
 
-        // Split into reader/writer
-        let (reader, writer) = transport.split();
-        let reader = Box::pin(reader.into_stream());
+    tokio::spawn(async move {
+        runner.run().await;
+    });
 
-        let _ = broadcast_tx.send(RendererBroadcast::Connected).await;
-
-        // Create command channel
-        let (command_tx, command_rx) = mpsc::channel(16);
-
-        // Create and spawn the runner
-        let runner = SessionRunner {
-            session_id: session_info.session_id.clone(),
-            reader,
-            writer,
-            device_uuid: device_config.device_uuid,
-            device_name: device_config.friendly_name.clone(),
-            renderer_id: 0,
-            is_active: false,
-            handler,
-            broadcast_tx,
-            command_rx,
-            state: SessionState::default(),
-            on_disconnect: Box::new(on_disconnect),
-        };
-
-        let task = tokio::spawn(async move {
-            runner.run().await;
-        });
-
-        Ok(Self {
-            session_id: session_info.session_id.clone(),
-            command_tx,
-            task,
-        })
-    }
-
-    /// Get the session ID.
-    #[allow(dead_code)] // Part of the API
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    /// Request current queue state from the server.
-    ///
-    /// The server will respond, triggering a call to `handler.on_queue_update()`.
-    pub async fn request_queue_state(&self) -> Result<()> {
-        self.command_tx
-            .send(SessionCommand::RequestQueueState)
-            .await
-            .map_err(|_| Error::Protocol("Session closed".to_string()))
-    }
-
-    /// Request current renderer state from the server.
-    ///
-    /// The server will respond with a `RendererStateUpdated` broadcast.
-    pub async fn request_renderer_state(&self) -> Result<()> {
-        self.command_tx
-            .send(SessionCommand::RequestRendererState)
-            .await
-            .map_err(|_| Error::Protocol("Session closed".to_string()))
-    }
-
-    /// Disconnect the session.
-    #[allow(dead_code)] // Part of the API
-    pub async fn disconnect(&self) -> Result<()> {
-        self.command_tx
-            .send(SessionCommand::Disconnect)
-            .await
-            .map_err(|_| Error::Protocol("Session already closed".to_string()))
-    }
-
-    /// Shutdown the session.
-    #[allow(dead_code)] // Part of the API
-    pub async fn shutdown(self) {
-        let _ = self.command_tx.send(SessionCommand::Shutdown).await;
-        let _ = self.task.await;
-    }
+    Ok(())
 }
 
 // ============================================================================
@@ -381,7 +326,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// The session runner that handles WebSocket communication.
 ///
 /// This runs in a spawned task and processes WebSocket messages,
-/// calls the handler for commands, and sends responses automatically.
+/// sends events to the user, and waits for responses via Responder.
 struct SessionRunner {
     session_id: String,
     reader: Pin<Box<dyn Stream<Item = Result<QConnectMessage>> + Send>>,
@@ -390,11 +335,8 @@ struct SessionRunner {
     device_name: String,
     renderer_id: u64,
     is_active: bool,
-    handler: SharedHandler,
-    broadcast_tx: mpsc::Sender<RendererBroadcast>,
-    command_rx: mpsc::Receiver<SessionCommand>,
+    event_tx: mpsc::Sender<SessionEvent>,
     state: SessionState,
-    on_disconnect: Box<dyn Fn() + Send>,
 }
 
 impl SessionRunner {
@@ -419,7 +361,7 @@ impl SessionRunner {
                         }
                         Some(Err(e)) => {
                             warn!(error = %e, "WebSocket error");
-                            let _ = self.broadcast_tx.send(RendererBroadcast::Disconnected {
+                            let _ = self.event_tx.send(SessionEvent::Disconnected {
                                 session_id: self.session_id.clone(),
                                 reason: Some(e.to_string()),
                             }).await;
@@ -427,7 +369,7 @@ impl SessionRunner {
                         }
                         None => {
                             info!("WebSocket closed");
-                            let _ = self.broadcast_tx.send(RendererBroadcast::Disconnected {
+                            let _ = self.event_tx.send(SessionEvent::Disconnected {
                                 session_id: self.session_id.clone(),
                                 reason: None,
                             }).await;
@@ -436,43 +378,15 @@ impl SessionRunner {
                     }
                 }
 
-                // Handle commands from the handle
-                cmd = self.command_rx.recv() => {
-                    match cmd {
-                        Some(SessionCommand::RequestQueueState) => {
-                            if let Err(e) = self.do_request_queue_state().await {
-                                warn!(error = %e, "Failed to request queue state");
-                            }
-                        }
-                        Some(SessionCommand::RequestRendererState) => {
-                            if let Err(e) = self.do_request_renderer_state().await {
-                                warn!(error = %e, "Failed to request renderer state");
-                            }
-                        }
-                        Some(SessionCommand::Disconnect) => {
-                            info!("Disconnect command received");
-                            let _ = self.writer.close().await;
-                            let _ = self.broadcast_tx.send(RendererBroadcast::Disconnected {
-                                session_id: self.session_id.clone(),
-                                reason: Some("Disconnect requested".to_string()),
-                            }).await;
-                            break;
-                        }
-                        Some(SessionCommand::Shutdown) | None => {
-                            info!("Session shutdown requested");
-                            break;
-                        }
-                    }
-                }
-
-                // Heartbeat timer - call handler for state update
+                // Heartbeat timer - send event and wait for response
                 _ = heartbeat.tick() => {
                     if self.is_active && self.renderer_id != 0 {
-                        let response = {
-                            let mut handler = self.handler.lock().unwrap();
-                            handler.on_heartbeat(self.renderer_id)
-                        };
-                        if let Some(resp) = response
+                        let (tx, rx) = oneshot::channel();
+                        let _ = self.event_tx.send(SessionEvent::Heartbeat {
+                            renderer_id: self.renderer_id,
+                            respond: Responder::new(tx),
+                        }).await;
+                        if let Ok(Some(resp)) = rx.await
                             && let Err(e) = self.send_playback_response(&resp).await
                         {
                             warn!(error = %e, "Failed to send heartbeat");
@@ -483,7 +397,9 @@ impl SessionRunner {
         }
 
         // Notify manager that session is done
-        (self.on_disconnect)();
+        let _ = self.event_tx.send(SessionEvent::SessionClosed {
+            device_uuid: self.device_uuid,
+        }).await;
         info!(session_id = %self.session_id, "Session runner stopped");
     }
 
@@ -640,8 +556,8 @@ impl SessionRunner {
                         info!(renderer_id = rid, name = %self.device_name, "Our device registered");
 
                         let _ = self
-                            .broadcast_tx
-                            .send(RendererBroadcast::DeviceRegistered {
+                            .event_tx
+                            .send(SessionEvent::DeviceRegistered {
                                 device_uuid: self.device_uuid,
                                 renderer_id: rid,
                             })
@@ -660,8 +576,8 @@ impl SessionRunner {
                         self.writer.send(msg).await?;
                     } else {
                         let _ = self
-                            .broadcast_tx
-                            .send(RendererBroadcast::RendererAdded {
+                            .event_tx
+                            .send(SessionEvent::RendererAdded {
                                 renderer_id: rid,
                                 name,
                             })
@@ -681,8 +597,8 @@ impl SessionRunner {
                     }
 
                     let _ = self
-                        .broadcast_tx
-                        .send(RendererBroadcast::RendererRemoved { renderer_id: rid })
+                        .event_tx
+                        .send(SessionEvent::RendererRemoved { renderer_id: rid })
                         .await;
                 }
             }
@@ -722,8 +638,8 @@ impl SessionRunner {
                     let rid = arc.renderer_id.unwrap_or(0);
 
                     let _ = self
-                        .broadcast_tx
-                        .send(RendererBroadcast::ActiveRendererChanged { renderer_id: rid })
+                        .event_tx
+                        .send(SessionEvent::ActiveRendererChanged { renderer_id: rid })
                         .await;
                 }
             }
@@ -750,11 +666,11 @@ impl SessionRunner {
                         })
                         .collect();
 
-                    // Call handler with queue update
-                    {
-                        let mut handler = self.handler.lock().unwrap();
-                        handler.on_queue_update(tracks, version);
-                    }
+                    // Send queue update event
+                    let _ = self.event_tx.send(SessionEvent::QueueUpdated {
+                        tracks,
+                        version,
+                    }).await;
                 }
             }
 
@@ -780,17 +696,21 @@ impl SessionRunner {
                         let queue_item_id =
                             ss.current_queue_item.as_ref().and_then(|q| q.queue_item_id);
 
-                        // Call handler and send response
+                        // Send event and wait for response
                         let cmd = PlaybackCommand {
                             state,
                             position_ms,
                             queue_item_id,
                         };
-                        let response = {
-                            let mut handler = self.handler.lock().unwrap();
-                            handler.on_playback_command(self.renderer_id, cmd)
-                        };
-                        if let Err(e) = self.send_playback_response(&response).await {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = self.event_tx.send(SessionEvent::PlaybackCommand {
+                            renderer_id: self.renderer_id,
+                            cmd,
+                            respond: Responder::new(tx),
+                        }).await;
+                        if let Ok(response) = rx.await
+                            && let Err(e) = self.send_playback_response(&response).await
+                        {
                             warn!(error = %e, "Failed to send playback response");
                         }
                     }
@@ -806,15 +726,18 @@ impl SessionRunner {
                         info!(renderer_id = self.renderer_id, "Server set us active");
                         self.is_active = true;
 
-                        // Call handler and send activation handshake
+                        // Send activation event and wait for response
                         // Note: We do NOT send playback state here. The server will send us
                         // SrvrRndrSetState with the current position, and we respond to that.
                         // This matches the C++ implementation behavior.
-                        let activation_state = {
-                            let mut handler = self.handler.lock().unwrap();
-                            handler.on_activate(self.renderer_id)
-                        };
-                        if let Err(e) = self.send_activation_handshake(&activation_state).await {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = self.event_tx.send(SessionEvent::Activate {
+                            renderer_id: self.renderer_id,
+                            respond: Responder::new(tx),
+                        }).await;
+                        if let Ok(activation_state) = rx.await
+                            && let Err(e) = self.send_activation_handshake(&activation_state).await
+                        {
                             warn!(error = %e, "Failed to send activation handshake");
                         }
 
@@ -829,17 +752,16 @@ impl SessionRunner {
                         );
                         self.is_active = false;
 
-                        // Notify handler
-                        {
-                            let mut handler = self.handler.lock().unwrap();
-                            handler.on_deactivate(self.renderer_id);
-                        }
+                        // Send deactivated event
+                        let _ = self.event_tx.send(SessionEvent::Deactivated {
+                            renderer_id: self.renderer_id,
+                        }).await;
 
                         // Close WebSocket and signal run loop to exit
                         let _ = self.writer.close().await;
                         let _ = self
-                            .broadcast_tx
-                            .send(RendererBroadcast::Disconnected {
+                            .event_tx
+                            .send(SessionEvent::Disconnected {
                                 session_id: self.session_id.clone(),
                                 reason: Some("Server set inactive".to_string()),
                             })
@@ -856,8 +778,8 @@ impl SessionRunner {
                     let volume = vc.volume.unwrap_or(0);
 
                     let _ = self
-                        .broadcast_tx
-                        .send(RendererBroadcast::VolumeBroadcast {
+                        .event_tx
+                        .send(SessionEvent::VolumeBroadcast {
                             renderer_id: rid,
                             volume,
                         })
@@ -870,11 +792,10 @@ impl SessionRunner {
                 if let Some(sm) = msg.srvr_ctrl_shuffle_mode_set {
                     let enabled = sm.shuffle_on.unwrap_or(false);
 
-                    // Call handler
-                    {
-                        let mut handler = self.handler.lock().unwrap();
-                        handler.on_shuffle_mode(enabled);
-                    }
+                    // Send shuffle mode event
+                    let _ = self.event_tx.send(SessionEvent::ShuffleModeChanged {
+                        enabled,
+                    }).await;
                 }
             }
 
@@ -886,11 +807,10 @@ impl SessionRunner {
                         .and_then(|i| LoopMode::try_from(i).ok())
                         .unwrap_or_default();
 
-                    // Call handler
-                    {
-                        let mut handler = self.handler.lock().unwrap();
-                        handler.on_loop_mode(mode);
-                    }
+                    // Send loop mode event
+                    let _ = self.event_tx.send(SessionEvent::LoopModeChanged {
+                        mode,
+                    }).await;
                 }
             }
 
@@ -901,8 +821,8 @@ impl SessionRunner {
                     let muted = vm.value.unwrap_or(false);
 
                     let _ = self
-                        .broadcast_tx
-                        .send(RendererBroadcast::VolumeMutedBroadcast {
+                        .event_tx
+                        .send(SessionEvent::VolumeMutedBroadcast {
                             renderer_id: rid,
                             muted,
                         })
@@ -917,8 +837,8 @@ impl SessionRunner {
 
                     // This broadcast doesn't include renderer_id; applies to active renderer
                     let _ = self
-                        .broadcast_tx
-                        .send(RendererBroadcast::MaxAudioQualityBroadcast {
+                        .event_tx
+                        .send(SessionEvent::MaxAudioQualityBroadcast {
                             renderer_id: self.renderer_id,
                             quality,
                         })
@@ -934,8 +854,8 @@ impl SessionRunner {
 
                     // This broadcast doesn't include renderer_id; applies to active renderer
                     let _ = self
-                        .broadcast_tx
-                        .send(RendererBroadcast::FileAudioQualityBroadcast {
+                        .event_tx
+                        .send(SessionEvent::FileAudioQualityBroadcast {
                             renderer_id: self.renderer_id,
                             sample_rate_hz,
                         })
@@ -965,13 +885,15 @@ impl SessionRunner {
                             } else {
                                 None
                             };
-                            let mut handler = self.handler.lock().unwrap();
-                            handler.on_restore_state(position_ms, queue_idx);
+                            let _ = self.event_tx.send(SessionEvent::RestoreState {
+                                position_ms,
+                                queue_index: queue_idx,
+                            }).await;
                         }
 
                         let _ = self
-                            .broadcast_tx
-                            .send(RendererBroadcast::RendererStateUpdated {
+                            .event_tx
+                            .send(SessionEvent::RendererStateUpdated {
                                 renderer_id: rid,
                                 state: play_state,
                                 position_ms,
