@@ -4,12 +4,15 @@ This document describes the async communication patterns and message flow in Qon
 
 ## Overview
 
-Qonductor has three main async components that communicate via channels:
+Qonductor has three main async components that communicate via channels.
+Each device gets its own event channel for clean isolation:
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
 │                          User Application                                 │
 │                                                                           │
+│   // Each device has its own event stream                                │
+│   let events = manager.add_device(config).await?;                        │
 │   while let Some(event) = events.recv().await {                          │
 │       match event {                                                       │
 │           SessionEvent::PlaybackCommand { respond, .. } => { ... }       │
@@ -17,36 +20,28 @@ Qonductor has three main async components that communicate via channels:
 │       }                                                                   │
 │   }                                                                       │
 └───────────────────────────────────────────────────────────────────────────┘
-                                    ▲
-                                    │ user_tx
-                                    │
-┌───────────────────────────────────┴───────────────────────────────────────┐
-│                         SessionManager.run()                              │
-│                                                                           │
-│   tokio::select! {                                                        │
-│       device_rx.recv() => spawn_session(internal_tx.clone())             │
-│       internal_rx.recv() => user_tx.send(event)                          │
-│   }                                                                       │
-└───────────────────────────────────────────────────────────────────────────┘
-          ▲                                           ▲
-          │ internal_tx                               │ device_rx
-          │                                           │
-┌─────────┴─────────────────────────┐    ┌───────────┴───────────────────────┐
+          ▲
+          │ event_tx (per device)
+          │
+┌─────────┴─────────────────────────┐    ┌───────────────────────────────────┐
 │     SessionRunner (per device)    │    │       DeviceRegistry              │
 │                                   │    │                                   │
 │   tokio::select! {                │    │  HTTP Server (Axum)               │
 │       ws.recv() => send event     │    │  mDNS Broadcast (zeroconf)        │
-│       heartbeat => send Heartbeat │    │                                   │
-│   }                               │    │  POST /devices/{uuid}/connect     │
+│       heartbeat => send Heartbeat │    │  Stores event_tx per device       │
+│   }                               │    │                                   │
+│                                   │    │  POST /devices/{uuid}/connect     │
 │                                   │    │    => device_tx.send(selected)    │
 └───────────────────────────────────┘    └───────────────────────────────────┘
-          │
-          │ WebSocket
-          ▼
-┌─────────────────────────┐
-│     Qobuz Server        │
-│     (qobuz.com)         │
-└─────────────────────────┘
+          │                                           ▲
+          │ WebSocket                                 │ device_rx
+          ▼                                           │
+┌─────────────────────────┐              ┌───────────┴───────────────────────┐
+│     Qobuz Server        │              │       SessionManager.run()        │
+│     (qobuz.com)         │              │                                   │
+└─────────────────────────┘              │   device_rx.recv() =>             │
+                                         │     spawn_session(device.event_tx)│
+                                         └───────────────────────────────────┘
 ```
 
 ## Channels
@@ -66,21 +61,20 @@ struct DeviceSelected {
 }
 ```
 
-### 2. Internal Event Channel
+### 2. Per-Device Event Channel
 
 **Type:** `mpsc::channel<SessionEvent>`
 **Capacity:** 100
-**Direction:** SessionRunner(s) → SessionManager
+**Direction:** SessionRunner → User Application (one per device)
 
-All session runners send events to this channel. The manager forwards all events to the user channel.
+Each device gets its own event channel, created when `add_device()` is called.
+The sender is stored in `DeviceRegistry` and passed to `SessionRunner` when a session starts.
+The receiver is returned to the user for handling that device's events.
 
-### 3. User Event Channel
-
-**Type:** `mpsc::channel<SessionEvent>`
-**Capacity:** 100
-**Direction:** SessionManager → User Application
-
-The user receives all events here. Events that require responses include a `Responder<T>`.
+This design enables:
+- Multiple devices with different Qobuz accounts
+- Clean event isolation per device
+- Independent event handling per device
 
 ## Event Types
 

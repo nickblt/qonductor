@@ -328,11 +328,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut player = FakePlayer::new();
 
     // Start the session manager
-    let (mut manager, mut events) = SessionManager::start(7864).await?;
+    let mut manager = SessionManager::start(7864).await?;
 
-    // Register device
+    // Register device and get its event channel
     let device_config = DeviceConfig::new("Fake Player", &config.app_id);
-    manager.add_device(device_config).await?;
+    let mut events = manager.add_device(device_config).await?;
     info!("Registered device: Fake Player");
 
     info!("Fake player running. Press Ctrl+C to stop.");

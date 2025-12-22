@@ -23,6 +23,7 @@ use zeroconf_tokio::{MdnsService, MdnsServiceAsync, ServiceType, TxtRecord};
 
 use crate::config::{AudioQuality, DeviceConfig, SessionInfo};
 use crate::proto::qconnect::DeviceType;
+use crate::qconnect::SessionEvent;
 use crate::{Error, Result};
 
 /// QConnect SDK version to advertise via mDNS.
@@ -127,6 +128,8 @@ struct RegisteredDevice {
     config: DeviceConfig,
     mdns_handle: MdnsServiceAsync,
     current_session_id: Option<String>,
+    /// Event channel sender for this device's session events.
+    event_tx: mpsc::Sender<SessionEvent>,
 }
 
 // ============================================================================
@@ -312,8 +315,12 @@ impl DeviceRegistry {
 
     /// Register a device for discovery.
     ///
-    /// Starts mDNS announcement for the device.
-    pub async fn add_device(&self, config: DeviceConfig) -> Result<()> {
+    /// Starts mDNS announcement for the device and returns an event receiver
+    /// for session events specific to this device.
+    pub async fn add_device(
+        &self,
+        config: DeviceConfig,
+    ) -> Result<mpsc::Receiver<SessionEvent>> {
         let uuid = config.device_uuid;
         let uuid_str = config.uuid_formatted();
 
@@ -323,6 +330,9 @@ impl DeviceRegistry {
             "Registering device"
         );
 
+        // Create per-device event channel
+        let (event_tx, event_rx) = mpsc::channel(100);
+
         // Register mDNS service
         let mdns_handle = self.register_mdns(&config, &uuid_str).await?;
 
@@ -330,11 +340,12 @@ impl DeviceRegistry {
             config,
             mdns_handle,
             current_session_id: None,
+            event_tx,
         };
 
         self.state.devices.write().await.insert(uuid, registered);
 
-        Ok(())
+        Ok(event_rx)
     }
 
     /// Unregister a device.
@@ -366,6 +377,19 @@ impl DeviceRegistry {
             .await
             .get(device_uuid)
             .map(|d| d.config.clone())
+    }
+
+    /// Get the event sender for a device by UUID.
+    pub async fn get_event_tx(
+        &self,
+        device_uuid: &[u8; 16],
+    ) -> Option<mpsc::Sender<SessionEvent>> {
+        self.state
+            .devices
+            .read()
+            .await
+            .get(device_uuid)
+            .map(|d| d.event_tx.clone())
     }
 
     /// Get all registered device configurations.

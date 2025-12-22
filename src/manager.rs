@@ -16,20 +16,19 @@ use crate::{Error, Result};
 /// This is the main entry point for using Qobuz Connect. It handles:
 /// - Device registration and mDNS announcements
 /// - Automatic session creation when devices are selected
-/// - Routing events to the user via the event channel
 ///
-/// Each device gets its own WebSocket connection to the Qobuz server.
+/// Each device gets its own WebSocket connection and event channel.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let (mut manager, mut events) = SessionManager::start(7864).await?;
-/// manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
+/// let mut manager = SessionManager::start(7864).await?;
+/// let mut events = manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
 ///
-/// // Spawn manager to handle device selections and route events
+/// // Spawn manager to handle device selections
 /// tokio::spawn(async move { manager.run().await });
 ///
-/// // Handle events
+/// // Handle events for this device
 /// while let Some(event) = events.recv().await {
 ///     match event {
 ///         SessionEvent::PlaybackCommand { cmd, respond, .. } => {
@@ -45,18 +44,10 @@ use crate::{Error, Result};
 pub struct SessionManager {
     registry: DeviceRegistry,
     device_rx: mpsc::Receiver<DeviceSelected>,
-    /// Internal event channel - receives from all SessionRunners.
-    internal_rx: mpsc::Receiver<SessionEvent>,
-    /// Internal sender - cloned to each SessionRunner.
-    internal_tx: mpsc::Sender<SessionEvent>,
-    /// User-facing event channel - we forward events here.
-    user_tx: mpsc::Sender<SessionEvent>,
 }
 
 impl SessionManager {
     /// Start the session manager with HTTP server on the given port.
-    ///
-    /// Returns the manager and a receiver for events.
     ///
     /// # Arguments
     ///
@@ -65,23 +56,16 @@ impl SessionManager {
     /// # Example
     ///
     /// ```ignore
-    /// let (mut manager, mut events) = SessionManager::start(7864).await?;
+    /// let mut manager = SessionManager::start(7864).await?;
+    /// let events = manager.add_device(device_config).await?;
     /// ```
-    pub async fn start(port: u16) -> Result<(Self, mpsc::Receiver<SessionEvent>)> {
+    pub async fn start(port: u16) -> Result<Self> {
         let (registry, device_rx) = DeviceRegistry::start(port).await?;
-        let (internal_tx, internal_rx) = mpsc::channel(100);
-        let (user_tx, user_rx) = mpsc::channel(100);
 
-        Ok((
-            Self {
-                registry,
-                device_rx,
-                internal_rx,
-                internal_tx,
-                user_tx,
-            },
-            user_rx,
-        ))
+        Ok(Self {
+            registry,
+            device_rx,
+        })
     }
 
     /// Register a device for discovery.
@@ -89,12 +73,20 @@ impl SessionManager {
     /// Starts mDNS announcement for the device. When a user selects this device
     /// in the Qobuz app, a session will be automatically created.
     ///
+    /// Returns a receiver for session events specific to this device.
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
+    /// let events = manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
+    /// while let Some(event) = events.recv().await {
+    ///     // Handle events for this device
+    /// }
     /// ```
-    pub async fn add_device(&self, config: DeviceConfig) -> Result<()> {
+    pub async fn add_device(
+        &self,
+        config: DeviceConfig,
+    ) -> Result<mpsc::Receiver<SessionEvent>> {
         self.registry.add_device(config).await
     }
 
@@ -113,11 +105,8 @@ impl SessionManager {
 
     /// Run the manager event loop.
     ///
-    /// This handles:
-    /// - Device selections (creates sessions)
-    /// - Event routing (forwards events to user)
-    ///
-    /// Must be called for events to flow to the user.
+    /// This handles device selections and creates sessions.
+    /// Events are delivered directly to each device's event channel.
     ///
     /// # Example
     ///
@@ -128,36 +117,15 @@ impl SessionManager {
         info!("SessionManager starting");
 
         loop {
-            tokio::select! {
-                // Handle device selections
-                selected = self.device_rx.recv() => {
-                    match selected {
-                        Some(s) => {
-                            if let Err(e) = self.handle_device_selected(s).await {
-                                error!(error = %e, "Failed to handle device selection");
-                            }
-                        }
-                        None => {
-                            warn!("Device selection channel closed");
-                            break;
-                        }
+            match self.device_rx.recv().await {
+                Some(s) => {
+                    if let Err(e) = self.handle_device_selected(s).await {
+                        error!(error = %e, "Failed to handle device selection");
                     }
                 }
-
-                // Route events from sessions to user
-                event = self.internal_rx.recv() => {
-                    match event {
-                        Some(e) => {
-                            // Forward to user
-                            if self.user_tx.send(e).await.is_err() {
-                                warn!("User event channel closed");
-                                break;
-                            }
-                        }
-                        None => {
-                            // All internal senders dropped - no more sessions
-                        }
-                    }
+                None => {
+                    warn!("Device selection channel closed");
+                    break;
                 }
             }
         }
@@ -174,16 +142,18 @@ impl SessionManager {
             .await
             .ok_or_else(|| Error::Discovery("Device not found".to_string()))?;
 
+        // Get the device's event sender
+        let event_tx = self
+            .registry
+            .get_event_tx(&selected.device_uuid)
+            .await
+            .ok_or_else(|| Error::Discovery("Device event channel not found".to_string()))?;
+
         info!(
             device = %device_config.friendly_name,
             "Device selected, creating session"
         );
 
-        spawn_session(
-            &selected.session_info,
-            &device_config,
-            self.internal_tx.clone(),
-        )
-        .await
+        spawn_session(&selected.session_info, &device_config, event_tx).await
     }
 }
