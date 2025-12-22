@@ -5,43 +5,65 @@ This document describes the async communication patterns and message flow in Qon
 ## Overview
 
 Qonductor has three main async components that communicate via channels.
-Each device gets its own event channel for clean isolation:
+Each device gets bidirectional communication via a `DeviceSession` handle:
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
 │                          User Application                                 │
 │                                                                           │
-│   // Each device has its own event stream                                │
-│   let events = manager.add_device(config).await?;                        │
-│   while let Some(event) = events.recv().await {                          │
+│   let mut session = manager.add_device(config).await?;                    │
+│   while let Some(event) = session.recv().await {                          │
 │       match event {                                                       │
-│           SessionEvent::PlaybackCommand { respond, .. } => { ... }       │
-│           SessionEvent::QueueUpdated { .. } => { ... }                   │
+│           SessionEvent::PlaybackCommand { respond, .. } => { ... }        │
+│           SessionEvent::QueueUpdated { .. } => { ... }                    │
 │       }                                                                   │
+│       // Player can also initiate state changes                           │
+│       session.report_state(response).await?;                              │
 │   }                                                                       │
 └───────────────────────────────────────────────────────────────────────────┘
-          ▲
-          │ event_tx (per device)
+          ▲                                         │
+          │ event_tx                                │ command_tx
+          │ (per device)                            │ (via SharedCommandTx)
+          │                                         ▼
+┌─────────┴─────────────────────────────────────────┴───────────────────────┐
+│                      SessionRunner (per device)                           │
+│                                                                           │
+│   tokio::select! {                                                        │
+│       ws.recv() => send event to user                                     │
+│       heartbeat => send Heartbeat event                                   │
+│       command_rx.recv() => send command to WebSocket                      │
+│   }                                                                       │
+└───────────────────────────────────────────────────────────────────────────┘
           │
-┌─────────┴─────────────────────────┐    ┌───────────────────────────────────┐
-│     SessionRunner (per device)    │    │       DeviceRegistry              │
-│                                   │    │                                   │
-│   tokio::select! {                │    │  HTTP Server (Axum)               │
-│       ws.recv() => send event     │    │  mDNS Broadcast (zeroconf)        │
-│       heartbeat => send Heartbeat │    │  Stores event_tx per device       │
-│   }                               │    │                                   │
-│                                   │    │  POST /devices/{uuid}/connect     │
-│                                   │    │    => device_tx.send(selected)    │
-└───────────────────────────────────┘    └───────────────────────────────────┘
-          │                                           ▲
-          │ WebSocket                                 │ device_rx
-          ▼                                           │
-┌─────────────────────────┐              ┌───────────┴───────────────────────┐
-│     Qobuz Server        │              │       SessionManager.run()        │
-│     (qobuz.com)         │              │                                   │
-└─────────────────────────┘              │   device_rx.recv() =>             │
-                                         │     spawn_session(device.event_tx)│
-                                         └───────────────────────────────────┘
+          │ WebSocket (bidirectional)
+          ▼
+┌─────────────────────────┐
+│     Qobuz Server        │
+│     (qobuz.com)         │
+└─────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                         DeviceRegistry                                    │
+│                                                                           │
+│   HTTP Server (Axum)                                                      │
+│   mDNS Broadcast (zeroconf)                                               │
+│   Stores per device: event_tx, SharedCommandTx                            │
+│                                                                           │
+│   POST /devices/{uuid}/connect => device_tx.send(selected)                │
+└───────────────────────────────────────────────────────────────────────────┘
+                                         ▲
+                                         │ device_rx
+                                         │
+┌────────────────────────────────────────┴──────────────────────────────────┐
+│                       SessionManager.run()                                │
+│                                                                           │
+│   device_rx.recv() => {                                                   │
+│       // Create command channel for this session                          │
+│       let (command_tx, command_rx) = mpsc::channel();                     │
+│       *shared_command_tx.write() = Some(command_tx);                      │
+│       spawn_session(event_tx, command_rx)                                 │
+│   }                                                                       │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Channels
@@ -61,57 +83,76 @@ struct DeviceSelected {
 }
 ```
 
-### 2. Per-Device Event Channel
+### 2. Per-Device Bidirectional Channels
 
-**Type:** `mpsc::channel<SessionEvent>`
-**Capacity:** 100
-**Direction:** SessionRunner → User Application (one per device)
+Each device gets bidirectional communication via a `DeviceSession` handle:
 
-Each device gets its own event channel, created when `add_device()` is called.
-The sender is stored in `DeviceRegistry` and passed to `SessionRunner` when a session starts.
-The receiver is returned to the user for handling that device's events.
+**Event Channel (server → user):**
+
+- **Type:** `mpsc::channel<SessionEvent>`
+- **Capacity:** 100
+- **Direction:** SessionRunner → User Application
+- **Created:** When `add_device()` is called
+
+**Command Channel (user → server):**
+
+- **Type:** `mpsc::channel<SessionCommand>`
+- **Capacity:** 100
+- **Direction:** User Application → SessionRunner
+- **Created:** When Qobuz app connects (session starts)
+
+**SharedCommandTx:**
+
+- **Type:** `Arc<RwLock<Option<mpsc::Sender<SessionCommand>>>>`
+- Shared between `DeviceSession` and `DeviceRegistry`
+- Initialized to `None` when `add_device()` is called
+- Set to `Some(sender)` when session starts
+- Allows `DeviceSession::report_*()` to send commands once connected
 
 This design enables:
+
 - Multiple devices with different Qobuz accounts
 - Clean event isolation per device
-- Independent event handling per device
+- Bidirectional communication (player can initiate state changes)
+- Multiple reconnects (new channel created each time)
+- Clear error if sending before connected
 
 ## Event Types
 
 ### Commands (require response via Responder)
 
-| Event | Response Type | When Sent |
-|-------|---------------|-----------|
-| `PlaybackCommand` | `PlaybackResponse` | Server commands play/pause/seek |
-| `Activate` | `ActivationState` | Device becomes active renderer |
-| `Heartbeat` | `Option<PlaybackResponse>` | Every 10 seconds while active |
+| Event             | Response Type              | When Sent                       |
+| ----------------- | -------------------------- | ------------------------------- |
+| `PlaybackCommand` | `PlaybackResponse`         | Server commands play/pause/seek |
+| `Activate`        | `ActivationState`          | Device becomes active renderer  |
+| `Heartbeat`       | `Option<PlaybackResponse>` | Every 10 seconds while active   |
 
 ### Events (no response needed)
 
-| Event | When Sent |
-|-------|-----------|
-| `Deactivated` | Device was deactivated by server |
-| `QueueUpdated` | Queue changed (tracks added/removed/reordered) |
-| `LoopModeChanged` | Loop mode changed (off/one/all) |
-| `ShuffleModeChanged` | Shuffle toggled |
-| `RestoreState` | Receiving state from previous active renderer |
+| Event                | When Sent                                      |
+| -------------------- | ---------------------------------------------- |
+| `Deactivated`        | Device was deactivated by server               |
+| `QueueUpdated`       | Queue changed (tracks added/removed/reordered) |
+| `LoopModeChanged`    | Loop mode changed (off/one/all)                |
+| `ShuffleModeChanged` | Shuffle toggled                                |
+| `RestoreState`       | Receiving state from previous active renderer  |
 
 ### Broadcasts (informational)
 
-| Event | When Sent |
-|-------|-----------|
-| `Connected` | WebSocket connection established |
-| `Disconnected` | WebSocket closed or error |
-| `DeviceRegistered` | Our device registered with server |
-| `RendererAdded` | Another device joined session |
-| `RendererRemoved` | A device left session |
-| `ActiveRendererChanged` | Active renderer changed |
-| `RendererStateUpdated` | Playback state broadcast from any renderer |
-| `VolumeBroadcast` | Volume changed |
-| `VolumeMutedBroadcast` | Mute state changed |
-| `MaxAudioQualityBroadcast` | Max quality capability changed |
-| `FileAudioQualityBroadcast` | Current file's sample rate |
-| `SessionClosed` | Session ended |
+| Event                       | When Sent                                  |
+| --------------------------- | ------------------------------------------ |
+| `Connected`                 | WebSocket connection established           |
+| `Disconnected`              | WebSocket closed or error                  |
+| `DeviceRegistered`          | Our device registered with server          |
+| `RendererAdded`             | Another device joined session              |
+| `RendererRemoved`           | A device left session                      |
+| `ActiveRendererChanged`     | Active renderer changed                    |
+| `RendererStateUpdated`      | Playback state broadcast from any renderer |
+| `VolumeBroadcast`           | Volume changed                             |
+| `VolumeMutedBroadcast`      | Mute state changed                         |
+| `MaxAudioQualityBroadcast`  | Max quality capability changed             |
+| `FileAudioQualityBroadcast` | Current file's sample rate                 |
+| `SessionClosed`             | Session ended                              |
 
 ## Message Flow Examples
 
@@ -194,6 +235,30 @@ This design enables:
    SrvrCtrlRendererStateUpdated (position updated in all Qobuz apps)
 ```
 
+### User-Initiated Command Flow
+
+```
+1. User pauses playback locally (not from Qobuz app)
+
+2. User Application calls session.report_state()
+   session.report_state(PlaybackResponse {
+       state: Paused,
+       position_ms: 45000,
+       ...
+   }).await?
+
+3. DeviceSession reads SharedCommandTx, sends command
+   command_tx.send(SessionCommand::ReportState(response))
+
+4. SessionRunner receives via command_rx.recv()
+
+5. SessionRunner → Qobuz Server (WebSocket)
+   RndrSrvrStateUpdated { playing_state: Paused, position: 45000 }
+
+6. Server broadcasts to all controllers
+   SrvrCtrlRendererStateUpdated (all Qobuz apps show paused)
+```
+
 ### Disconnect Flow
 
 ```
@@ -218,16 +283,16 @@ This design enables:
 
 ## Spawned Tasks
 
-| Task | Location | Lifetime | Purpose |
-|------|----------|----------|---------|
-| HTTP Server | `discovery.rs` | App lifetime | Serves device discovery endpoints |
-| SessionManager.run() | `manager.rs` | App lifetime | Routes events, handles device selections |
-| SessionRunner | `qconnect.rs` | Per-session | WebSocket handling, event generation |
+| Task                 | Location       | Lifetime     | Purpose                                  |
+| -------------------- | -------------- | ------------ | ---------------------------------------- |
+| HTTP Server          | `discovery.rs` | App lifetime | Serves device discovery endpoints        |
+| SessionManager.run() | `manager.rs`   | App lifetime | Routes events, handles device selections |
+| SessionRunner        | `qconnect.rs`  | Per-session  | WebSocket handling, event generation     |
 
 ## Shared State
 
-| State | Type | Location | Purpose |
-|-------|------|----------|---------|
+| State           | Type              | Location       | Purpose                       |
+| --------------- | ----------------- | -------------- | ----------------------------- |
 | Device Registry | `RwLock<HashMap>` | DeviceRegistry | Device configs + mDNS handles |
 
 ## Protocol Details
@@ -247,28 +312,28 @@ Type 9 = Error
 
 ### QConnect Message Types
 
-| Type | Name | Direction | Purpose |
-|------|------|-----------|---------|
-| 23 | RndrSrvrStateUpdated | TX | Report playback state |
-| 25 | RndrSrvrVolumeChanged | TX | Report volume |
-| 26 | RndrSrvrFileAudioQualityChanged | TX | Report sample rate |
-| 28 | RndrSrvrMaxAudioQualityChanged | TX | Report max quality capability |
-| 29 | RndrSrvrVolumeMuted | TX | Report mute state |
-| 41 | SrvrRndrSetState | RX | Server commands play/pause/seek |
-| 43 | SrvrRndrSetActive | RX | Server activates/deactivates us |
-| 77 | CtrlSrvrAskForRendererState | TX | Request current state |
-| 81 | SrvrCtrlSessionState | RX | Session info on connect |
-| 82 | SrvrCtrlRendererStateUpdated | RX | Broadcast state (ignore as renderer) |
-| 83 | SrvrCtrlAddRenderer | RX | New renderer joined |
-| 85 | SrvrCtrlRemoveRenderer | RX | Renderer left |
-| 86 | SrvrCtrlActiveRendererChanged | RX | Active renderer changed |
-| 87 | SrvrCtrlVolumeChanged | RX | Broadcast volume |
-| 90 | SrvrCtrlQueueState | RX | Full queue snapshot |
-| 96 | SrvrCtrlShuffleModeSet | RX | Shuffle mode changed |
-| 97 | SrvrCtrlLoopModeSet | RX | Loop mode changed |
-| 98 | SrvrCtrlVolumeMuted | RX | Broadcast mute state |
-| 99 | SrvrCtrlMaxAudioQualityChanged | RX | Broadcast max quality |
-| 100 | SrvrCtrlFileAudioQualityChanged | RX | Broadcast file quality |
+| Type | Name                            | Direction | Purpose                              |
+| ---- | ------------------------------- | --------- | ------------------------------------ |
+| 23   | RndrSrvrStateUpdated            | TX        | Report playback state                |
+| 25   | RndrSrvrVolumeChanged           | TX        | Report volume                        |
+| 26   | RndrSrvrFileAudioQualityChanged | TX        | Report sample rate                   |
+| 28   | RndrSrvrMaxAudioQualityChanged  | TX        | Report max quality capability        |
+| 29   | RndrSrvrVolumeMuted             | TX        | Report mute state                    |
+| 41   | SrvrRndrSetState                | RX        | Server commands play/pause/seek      |
+| 43   | SrvrRndrSetActive               | RX        | Server activates/deactivates us      |
+| 77   | CtrlSrvrAskForRendererState     | TX        | Request current state                |
+| 81   | SrvrCtrlSessionState            | RX        | Session info on connect              |
+| 82   | SrvrCtrlRendererStateUpdated    | RX        | Broadcast state (ignore as renderer) |
+| 83   | SrvrCtrlAddRenderer             | RX        | New renderer joined                  |
+| 85   | SrvrCtrlRemoveRenderer          | RX        | Renderer left                        |
+| 86   | SrvrCtrlActiveRendererChanged   | RX        | Active renderer changed              |
+| 87   | SrvrCtrlVolumeChanged           | RX        | Broadcast volume                     |
+| 90   | SrvrCtrlQueueState              | RX        | Full queue snapshot                  |
+| 96   | SrvrCtrlShuffleModeSet          | RX        | Shuffle mode changed                 |
+| 97   | SrvrCtrlLoopModeSet             | RX        | Loop mode changed                    |
+| 98   | SrvrCtrlVolumeMuted             | RX        | Broadcast mute state                 |
+| 99   | SrvrCtrlMaxAudioQualityChanged  | RX        | Broadcast max quality                |
+| 100  | SrvrCtrlFileAudioQualityChanged | RX        | Broadcast file quality               |
 
 TX = Sent by us (renderer)
 RX = Received from server

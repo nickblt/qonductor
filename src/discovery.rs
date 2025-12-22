@@ -23,7 +23,7 @@ use zeroconf_tokio::{MdnsService, MdnsServiceAsync, ServiceType, TxtRecord};
 
 use crate::config::{AudioQuality, DeviceConfig, SessionInfo};
 use crate::proto::qconnect::DeviceType;
-use crate::qconnect::SessionEvent;
+use crate::qconnect::{DeviceSession, SessionEvent, SharedCommandTx};
 use crate::{Error, Result};
 
 /// QConnect SDK version to advertise via mDNS.
@@ -130,6 +130,8 @@ struct RegisteredDevice {
     current_session_id: Option<String>,
     /// Event channel sender for this device's session events.
     event_tx: mpsc::Sender<SessionEvent>,
+    /// Shared command sender, populated when session connects.
+    command_tx: SharedCommandTx,
 }
 
 // ============================================================================
@@ -315,12 +317,9 @@ impl DeviceRegistry {
 
     /// Register a device for discovery.
     ///
-    /// Starts mDNS announcement for the device and returns an event receiver
-    /// for session events specific to this device.
-    pub async fn add_device(
-        &self,
-        config: DeviceConfig,
-    ) -> Result<mpsc::Receiver<SessionEvent>> {
+    /// Starts mDNS announcement for the device and returns a `DeviceSession`
+    /// handle for bidirectional communication with the session.
+    pub async fn add_device(&self, config: DeviceConfig) -> Result<DeviceSession> {
         let uuid = config.device_uuid;
         let uuid_str = config.uuid_formatted();
 
@@ -330,8 +329,11 @@ impl DeviceRegistry {
             "Registering device"
         );
 
-        // Create per-device event channel
+        // Create per-device event channel (server -> user)
         let (event_tx, event_rx) = mpsc::channel(100);
+
+        // Create shared command sender (will be populated when session connects)
+        let command_tx: SharedCommandTx = Arc::new(RwLock::new(None));
 
         // Register mDNS service
         let mdns_handle = self.register_mdns(&config, &uuid_str).await?;
@@ -341,11 +343,12 @@ impl DeviceRegistry {
             mdns_handle,
             current_session_id: None,
             event_tx,
+            command_tx: command_tx.clone(),
         };
 
         self.state.devices.write().await.insert(uuid, registered);
 
-        Ok(event_rx)
+        Ok(DeviceSession::new(event_rx, command_tx))
     }
 
     /// Unregister a device.
@@ -390,6 +393,19 @@ impl DeviceRegistry {
             .await
             .get(device_uuid)
             .map(|d| d.event_tx.clone())
+    }
+
+    /// Get the shared command sender for a device by UUID.
+    ///
+    /// Returns a clone of the Arc, which can be used to set the sender
+    /// when a session starts.
+    pub async fn get_command_tx(&self, device_uuid: &[u8; 16]) -> Option<SharedCommandTx> {
+        self.state
+            .devices
+            .read()
+            .await
+            .get(device_uuid)
+            .map(|d| d.command_tx.clone())
     }
 
     /// Get all registered device configurations.

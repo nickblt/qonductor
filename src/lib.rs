@@ -9,12 +9,12 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> qonductor::Result<()> {
-//!     let (mut manager, mut events) = SessionManager::start(7864).await?;
-//!     manager.add_device(DeviceConfig::new("Living Room", "your_app_id")).await?;
+//!     let mut manager = SessionManager::start(7864).await?;
+//!     let mut session = manager.add_device(DeviceConfig::new("Living Room", "your_app_id")).await?;
 //!
 //!     tokio::spawn(async move { manager.run().await });
 //!
-//!     while let Some(event) = events.recv().await {
+//!     while let Some(event) = session.recv().await {
 //!         match event {
 //!             SessionEvent::PlaybackCommand { renderer_id, cmd, respond } => {
 //!                 println!("Playback command: {:?}", cmd);
@@ -25,6 +25,9 @@
 //!             }
 //!             _ => {}
 //!         }
+//!
+//!         // Player can also send state updates to the server
+//!         session.report_state(PlaybackResponse { /* ... */ }).await?;
 //!     }
 //!     Ok(())
 //! }
@@ -44,7 +47,8 @@ pub(crate) mod transport;
 // Re-export main public API
 pub use manager::SessionManager;
 pub use qconnect::{
-    ActivationState, PlaybackCommand, PlaybackResponse, QueueTrack, Responder, SessionEvent,
+    ActivationState, DeviceSession, PlaybackCommand, PlaybackResponse, QueueTrack, Responder,
+    SessionCommand, SessionEvent,
 };
 pub use proto::qconnect::{BufferState, DeviceType, LoopMode, PlayingState};
 pub use config::{AudioQuality, DeviceConfig};

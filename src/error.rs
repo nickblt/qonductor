@@ -60,4 +60,8 @@ pub enum Error {
     /// Protocol error.
     #[error("protocol error: {0}")]
     Protocol(String),
+
+    /// Session error (e.g., channel closed).
+    #[error("session error: {0}")]
+    Session(String),
 }

@@ -11,13 +11,12 @@
 //! Run with debug: RUST_LOG=qonductor=debug cargo run --example discovery_server
 
 use qonductor::{
-    ActivationState, BufferState, DeviceConfig, PlaybackResponse, PlayingState, SessionEvent,
-    SessionManager,
+    ActivationState, BufferState, DeviceConfig, DeviceSession, PlaybackResponse, PlayingState,
+    SessionEvent, SessionManager,
 };
 use serde::Deserialize;
 use std::fs;
 use tokio::signal;
-use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -29,8 +28,8 @@ struct Credentials {
 }
 
 /// Handle events for a single device.
-async fn handle_device_events(device_name: String, mut events: mpsc::Receiver<SessionEvent>) {
-    while let Some(event) = events.recv().await {
+async fn handle_device_events(device_name: String, mut session: DeviceSession) {
+    while let Some(event) = session.recv().await {
         match event {
             // === Commands (require response) ===
 
@@ -243,12 +242,12 @@ async fn main() {
 
     for name in &devices {
         let config = DeviceConfig::new(*name, &creds.app_id);
-        let events = manager.add_device(config).await.unwrap();
+        let session = manager.add_device(config).await.unwrap();
         println!("Registered device: {}", name);
 
         // Spawn a task to handle events for this device
         let device_name = name.to_string();
-        tokio::spawn(handle_device_events(device_name, events));
+        tokio::spawn(handle_device_events(device_name, session));
     }
 
     println!("\nDiscovery server running. Press Ctrl+C to stop.");

@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 
 use crate::config::DeviceConfig;
 use crate::discovery::{DeviceRegistry, DeviceSelected};
-use crate::qconnect::{spawn_session, SessionEvent};
+use crate::qconnect::{spawn_session, DeviceSession};
 use crate::{Error, Result};
 
 /// Manager for Qobuz Connect sessions.
@@ -17,19 +17,19 @@ use crate::{Error, Result};
 /// - Device registration and mDNS announcements
 /// - Automatic session creation when devices are selected
 ///
-/// Each device gets its own WebSocket connection and event channel.
+/// Each device gets its own WebSocket connection and bidirectional session handle.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let mut manager = SessionManager::start(7864).await?;
-/// let mut events = manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
+/// let mut session = manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
 ///
 /// // Spawn manager to handle device selections
 /// tokio::spawn(async move { manager.run().await });
 ///
 /// // Handle events for this device
-/// while let Some(event) = events.recv().await {
+/// while let Some(event) = session.recv().await {
 ///     match event {
 ///         SessionEvent::PlaybackCommand { cmd, respond, .. } => {
 ///             respond.send(my_player.handle_playback(cmd));
@@ -39,6 +39,9 @@ use crate::{Error, Result};
 ///         }
 ///         _ => {}
 ///     }
+///
+///     // Player can also initiate state changes
+///     session.report_state(PlaybackResponse { ... }).await?;
 /// }
 /// ```
 pub struct SessionManager {
@@ -73,20 +76,21 @@ impl SessionManager {
     /// Starts mDNS announcement for the device. When a user selects this device
     /// in the Qobuz app, a session will be automatically created.
     ///
-    /// Returns a receiver for session events specific to this device.
+    /// Returns a `DeviceSession` handle for bidirectional communication.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let events = manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
-    /// while let Some(event) = events.recv().await {
+    /// let mut session = manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
+    ///
+    /// while let Some(event) = session.recv().await {
     ///     // Handle events for this device
     /// }
+    ///
+    /// // Player can send state updates
+    /// session.report_state(state).await?;
     /// ```
-    pub async fn add_device(
-        &self,
-        config: DeviceConfig,
-    ) -> Result<mpsc::Receiver<SessionEvent>> {
+    pub async fn add_device(&self, config: DeviceConfig) -> Result<DeviceSession> {
         self.registry.add_device(config).await
     }
 
@@ -149,11 +153,24 @@ impl SessionManager {
             .await
             .ok_or_else(|| Error::Discovery("Device event channel not found".to_string()))?;
 
+        // Get the shared command sender and create the channel
+        let shared_command_tx = self
+            .registry
+            .get_command_tx(&selected.device_uuid)
+            .await
+            .ok_or_else(|| Error::Discovery("Device command channel not found".to_string()))?;
+
+        // Create the command channel for this session
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(100);
+
+        // Set the sender in the shared state so DeviceSession can use it
+        *shared_command_tx.write().await = Some(command_tx);
+
         info!(
             device = %device_config.friendly_name,
             "Device selected, creating session"
         );
 
-        spawn_session(&selected.session_info, &device_config, event_tx).await
+        spawn_session(&selected.session_info, &device_config, event_tx, command_rx).await
     }
 }

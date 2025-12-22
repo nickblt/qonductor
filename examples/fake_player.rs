@@ -330,9 +330,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start the session manager
     let mut manager = SessionManager::start(7864).await?;
 
-    // Register device and get its event channel
+    // Register device and get its session handle
     let device_config = DeviceConfig::new("Fake Player", &config.app_id);
-    let mut events = manager.add_device(device_config).await?;
+    let mut session = manager.add_device(device_config).await?;
     info!("Registered device: Fake Player");
 
     info!("Fake player running. Press Ctrl+C to stop.");
@@ -348,7 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main loop: handle events and ctrl+c
     loop {
         tokio::select! {
-            Some(event) = events.recv() => {
+            Some(event) = session.recv() => {
                 match event {
                     // === Commands (require response) ===
 

@@ -8,10 +8,11 @@
 //! include a `Responder` that must be used to send the response.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use futures::stream::Stream;
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
 
@@ -117,7 +118,130 @@ impl<T> Responder<T> {
 }
 
 // ============================================================================
-// Session Events
+// Session Commands (user -> server)
+// ============================================================================
+
+/// Commands that can be sent from the application to the Qobuz server.
+///
+/// These are used when the player initiates state changes (not in response
+/// to server commands).
+#[derive(Debug, Clone)]
+pub enum SessionCommand {
+    /// Report current playback state to server.
+    ReportState(PlaybackResponse),
+    /// Report volume level (0-100).
+    ReportVolume(u32),
+    /// Report mute state.
+    ReportVolumeMuted(bool),
+    /// Report max audio quality capability (1-4).
+    ReportMaxAudioQuality(i32),
+    /// Report current file's sample rate in Hz.
+    ReportFileAudioQuality(u32),
+}
+
+// ============================================================================
+// Device Session Handle
+// ============================================================================
+
+/// Shared command sender, set when session connects.
+pub(crate) type SharedCommandTx = Arc<RwLock<Option<mpsc::Sender<SessionCommand>>>>;
+
+/// Handle for a device session providing bidirectional communication.
+///
+/// This is returned by `SessionManager::add_device()` and provides:
+/// - Receiving events from the server via `recv()`
+/// - Sending state updates to the server via `report_*()` methods
+///
+/// Note: `report_*()` methods will return an error if called before the
+/// Qobuz app connects to this device.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut session = manager.add_device(config).await?;
+///
+/// while let Some(event) = session.recv().await {
+///     match event {
+///         SessionEvent::PlaybackCommand { cmd, respond, .. } => {
+///             let response = handle_command(cmd);
+///             respond.send(response);
+///         }
+///         _ => {}
+///     }
+///
+///     // Player initiates a pause
+///     session.report_state(PlaybackResponse {
+///         state: PlayingState::Paused,
+///         ..current_state
+///     }).await?;
+/// }
+/// ```
+pub struct DeviceSession {
+    events: mpsc::Receiver<SessionEvent>,
+    command_tx: SharedCommandTx,
+}
+
+impl DeviceSession {
+    /// Create a new device session handle.
+    pub(crate) fn new(
+        events: mpsc::Receiver<SessionEvent>,
+        command_tx: SharedCommandTx,
+    ) -> Self {
+        Self { events, command_tx }
+    }
+
+    /// Receive the next event from the session.
+    ///
+    /// Returns `None` when the session is closed.
+    pub async fn recv(&mut self) -> Option<SessionEvent> {
+        self.events.recv().await
+    }
+
+    /// Send a command to the server.
+    async fn send_command(&self, cmd: SessionCommand) -> crate::Result<()> {
+        let guard = self.command_tx.read().await;
+        match &*guard {
+            Some(tx) => tx
+                .send(cmd)
+                .await
+                .map_err(|_| crate::Error::Session("Session closed".to_string())),
+            None => Err(crate::Error::Session("Not connected".to_string())),
+        }
+    }
+
+    /// Report current playback state to the server.
+    ///
+    /// Use this when the player initiates state changes (pause, seek, track change)
+    /// rather than responding to server commands.
+    ///
+    /// Returns an error if not connected to the Qobuz server.
+    pub async fn report_state(&self, state: PlaybackResponse) -> crate::Result<()> {
+        self.send_command(SessionCommand::ReportState(state)).await
+    }
+
+    /// Report volume level to the server.
+    pub async fn report_volume(&self, volume: u32) -> crate::Result<()> {
+        self.send_command(SessionCommand::ReportVolume(volume)).await
+    }
+
+    /// Report mute state to the server.
+    pub async fn report_muted(&self, muted: bool) -> crate::Result<()> {
+        self.send_command(SessionCommand::ReportVolumeMuted(muted)).await
+    }
+
+    /// Report max audio quality capability to the server.
+    pub async fn report_max_audio_quality(&self, quality: i32) -> crate::Result<()> {
+        self.send_command(SessionCommand::ReportMaxAudioQuality(quality)).await
+    }
+
+    /// Report current file's audio quality (sample rate in Hz) to the server.
+    pub async fn report_file_audio_quality(&self, sample_rate_hz: u32) -> crate::Result<()> {
+        self.send_command(SessionCommand::ReportFileAudioQuality(sample_rate_hz)).await
+    }
+}
+
+// ============================================================================
+// Session Events (server -> user)
 // ============================================================================
 
 /// A track in the queue.
@@ -259,10 +383,12 @@ pub enum SessionEvent {
 ///
 /// The session runs until the WebSocket closes or an error occurs.
 /// Events are sent to the provided `event_tx` channel.
+/// Commands are received from the `command_rx` channel.
 pub(crate) async fn spawn_session(
     session_info: &SessionInfo,
     device_config: &DeviceConfig,
     event_tx: mpsc::Sender<SessionEvent>,
+    command_rx: mpsc::Receiver<SessionCommand>,
 ) -> Result<()> {
     debug!(
         session_id = %session_info.session_id,
@@ -294,6 +420,7 @@ pub(crate) async fn spawn_session(
         renderer_id: 0,
         is_active: false,
         event_tx,
+        command_rx,
         state: SessionState::default(),
     };
 
@@ -326,7 +453,8 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// The session runner that handles WebSocket communication.
 ///
 /// This runs in a spawned task and processes WebSocket messages,
-/// sends events to the user, and waits for responses via Responder.
+/// sends events to the user, receives commands from the user,
+/// and waits for responses via Responder.
 struct SessionRunner {
     session_id: String,
     reader: Pin<Box<dyn Stream<Item = Result<QConnectMessage>> + Send>>,
@@ -336,6 +464,7 @@ struct SessionRunner {
     renderer_id: u64,
     is_active: bool,
     event_tx: mpsc::Sender<SessionEvent>,
+    command_rx: mpsc::Receiver<SessionCommand>,
     state: SessionState,
 }
 
@@ -393,6 +522,21 @@ impl SessionRunner {
                         }
                     }
                 }
+
+                // Handle commands from user
+                cmd = self.command_rx.recv() => {
+                    match cmd {
+                        Some(command) => {
+                            if let Err(e) = self.handle_command(command).await {
+                                warn!(error = %e, "Failed to handle command");
+                            }
+                        }
+                        None => {
+                            // Command channel closed, user dropped DeviceSession
+                            debug!("Command channel closed");
+                        }
+                    }
+                }
             }
         }
 
@@ -401,6 +545,27 @@ impl SessionRunner {
             device_uuid: self.device_uuid,
         }).await;
         info!(session_id = %self.session_id, "Session runner stopped");
+    }
+
+    /// Handle a command from the user.
+    async fn handle_command(&mut self, command: SessionCommand) -> Result<()> {
+        match command {
+            SessionCommand::ReportState(resp) => {
+                self.send_playback_response(&resp).await
+            }
+            SessionCommand::ReportVolume(volume) => {
+                self.do_report_volume(volume).await
+            }
+            SessionCommand::ReportVolumeMuted(muted) => {
+                self.do_report_volume_muted(muted).await
+            }
+            SessionCommand::ReportMaxAudioQuality(quality) => {
+                self.do_report_max_audio_quality(quality).await
+            }
+            SessionCommand::ReportFileAudioQuality(sample_rate_hz) => {
+                self.do_report_file_audio_quality(sample_rate_hz).await
+            }
+        }
     }
 
     /// Report volume to server.
@@ -444,7 +609,6 @@ impl SessionRunner {
     }
 
     /// Report actual file audio quality (sample rate in Hz) to server.
-    #[allow(dead_code)] // May be used when track playback starts
     async fn do_report_file_audio_quality(&mut self, sample_rate_hz: u32) -> Result<()> {
         let msg = QConnectMessage {
             message_type: Some(
