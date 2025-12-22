@@ -48,8 +48,8 @@ futures = "0.3"
 rand = "0.8"
 uuid = { version = "1", features = ["std"] }
 
-# mDNS via zeroconf-tokio (uses system avahi)
-zeroconf-tokio = "0.3"
+# mDNS (pure Rust, no system dependencies)
+mdns-sd = "0.17.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -4,8 +4,9 @@
 //! that allow Qobuz controllers to discover and connect to devices.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -13,13 +14,12 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use zeroconf_tokio::prelude::*;
-use zeroconf_tokio::{MdnsService, MdnsServiceAsync, ServiceType, TxtRecord};
 
 use crate::config::{AudioQuality, DeviceConfig, SessionInfo};
 use crate::proto::qconnect::DeviceType;
@@ -126,7 +126,8 @@ struct ConnectResponse {
 /// A device registered with the registry.
 struct RegisteredDevice {
     config: DeviceConfig,
-    mdns_handle: MdnsServiceAsync,
+    /// The mDNS service info for this device (stored for re-announcements).
+    service_info: ServiceInfo,
     current_session_id: Option<String>,
     /// Event channel sender for this device's session events.
     event_tx: mpsc::Sender<SessionEvent>,
@@ -256,6 +257,10 @@ async fn connect_to_qconnect(
 // Device Registry
 // ============================================================================
 
+/// Re-announcement interval for mDNS services.
+/// Sends periodic announcements to keep devices visible in Qobuz app.
+const REANNOUNCE_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Registry for Qobuz Connect devices.
 ///
 /// Manages mDNS announcements and HTTP endpoints for multiple devices.
@@ -263,6 +268,8 @@ async fn connect_to_qconnect(
 pub struct DeviceRegistry {
     state: Arc<AppState>,
     http_port: u16,
+    /// The mDNS daemon shared across all devices.
+    mdns_daemon: ServiceDaemon,
 }
 
 impl DeviceRegistry {
@@ -306,13 +313,47 @@ impl DeviceRegistry {
             }
         });
 
+        // Create the mDNS daemon
+        let mdns_daemon = ServiceDaemon::new()
+            .map_err(|e| Error::Mdns(format!("Failed to create mDNS daemon: {e}")))?;
+
+        info!("mDNS daemon started");
+
+        // Spawn periodic re-announcement task
+        let state_clone = state.clone();
+        let daemon_clone = mdns_daemon.clone();
+        tokio::spawn(async move {
+            Self::reannounce_loop(state_clone, daemon_clone).await;
+        });
+
         Ok((
             Self {
                 state,
                 http_port: local_addr.port(),
+                mdns_daemon,
             },
             event_rx,
         ))
+    }
+
+    /// Periodically re-announce all registered services.
+    /// This works around a bug in the Qobuz app where it only processes
+    /// the first PTR record in batched mDNS responses.
+    async fn reannounce_loop(state: Arc<AppState>, daemon: ServiceDaemon) {
+        loop {
+            tokio::time::sleep(REANNOUNCE_INTERVAL).await;
+
+            let devices = state.devices.read().await;
+            for device in devices.values() {
+                if let Err(e) = daemon.register(device.service_info.clone()) {
+                    debug!(
+                        error = %e,
+                        device = %device.config.friendly_name,
+                        "Failed to re-announce service"
+                    );
+                }
+            }
+        }
     }
 
     /// Register a device for discovery.
@@ -336,11 +377,11 @@ impl DeviceRegistry {
         let command_tx: SharedCommandTx = Arc::new(RwLock::new(None));
 
         // Register mDNS service
-        let mdns_handle = self.register_mdns(&config, &uuid_str).await?;
+        let service_info = self.register_mdns(&config, &uuid_str)?;
 
         let registered = RegisteredDevice {
             config,
-            mdns_handle,
+            service_info,
             current_session_id: None,
             event_tx,
             command_tx: command_tx.clone(),
@@ -357,13 +398,17 @@ impl DeviceRegistry {
     pub async fn remove_device(&self, device_uuid: &[u8; 16]) -> Result<()> {
         let mut devices = self.state.devices.write().await;
 
-        if let Some(mut device) = devices.remove(device_uuid) {
+        if let Some(device) = devices.remove(device_uuid) {
             info!(
                 device = %device.config.friendly_name,
                 "Unregistering device"
             );
-            if let Err(e) = device.mdns_handle.shutdown().await {
-                warn!(error = %e, "Failed to shutdown mDNS service");
+            // Unregister from mDNS daemon (sends goodbye packet asynchronously)
+            if let Err(e) = self
+                .mdns_daemon
+                .unregister(device.service_info.get_fullname())
+            {
+                warn!(error = %e, "Failed to unregister mDNS service");
             }
         } else {
             warn!(uuid = %Uuid::from_bytes(*device_uuid), "Device not found for removal");
@@ -383,10 +428,7 @@ impl DeviceRegistry {
     }
 
     /// Get the event sender for a device by UUID.
-    pub async fn get_event_tx(
-        &self,
-        device_uuid: &[u8; 16],
-    ) -> Option<mpsc::Sender<SessionEvent>> {
+    pub async fn get_event_tx(&self, device_uuid: &[u8; 16]) -> Option<mpsc::Sender<SessionEvent>> {
         self.state
             .devices
             .read()
@@ -420,26 +462,33 @@ impl DeviceRegistry {
     }
 
     /// Register mDNS service for a device.
-    async fn register_mdns(&self, config: &DeviceConfig, uuid_hex: &str) -> Result<MdnsServiceAsync> {
-        let service_type = ServiceType::new("qobuz-connect", "tcp")
-            .map_err(|e| Error::Mdns(format!("Failed to create service type: {e}")))?;
+    fn register_mdns(&self, config: &DeviceConfig, uuid_hex: &str) -> Result<ServiceInfo> {
+        let service_type = "_qobuz-connect._tcp.local.";
+        let instance_name = &config.friendly_name;
 
-        let mut service = MdnsService::new(service_type, self.http_port);
-        service.set_name(&config.friendly_name);
+        // Get local IP and hostname
+        let ipv4 = get_local_ipv4().unwrap_or(Ipv4Addr::LOCALHOST);
+        let ip_str = ipv4.to_string();
+        let hostname = "qonductor.local.";
 
-        // Set TXT records with device-specific path
-        let mut txt = TxtRecord::new();
-        txt.insert("path", &format!("/devices/{}", uuid_hex))
-            .map_err(|e| Error::Mdns(format!("Failed to insert TXT record: {e}")))?;
-        txt.insert("type", config.device_type.as_str())
-            .map_err(|e| Error::Mdns(format!("Failed to insert TXT record: {e}")))?;
-        txt.insert("Name", &config.friendly_name)
-            .map_err(|e| Error::Mdns(format!("Failed to insert TXT record: {e}")))?;
-        txt.insert("device_uuid", uuid_hex)
-            .map_err(|e| Error::Mdns(format!("Failed to insert TXT record: {e}")))?;
-        txt.insert("sdk_version", QCONNECT_SDK_VERSION)
-            .map_err(|e| Error::Mdns(format!("Failed to insert TXT record: {e}")))?;
-        service.set_txt_record(txt);
+        // Build TXT record properties
+        let properties = [
+            ("path", format!("/devices/{}", uuid_hex)),
+            ("type", config.device_type.as_str().to_string()),
+            ("Name", config.friendly_name.clone()),
+            ("device_uuid", uuid_hex.to_string()),
+            ("sdk_version", QCONNECT_SDK_VERSION.to_string()),
+        ];
+
+        let service_info = ServiceInfo::new(
+            service_type,
+            instance_name,
+            hostname,
+            &ip_str,
+            self.http_port,
+            &properties[..],
+        )
+        .map_err(|e| Error::Mdns(format!("Failed to create service info: {e}")))?;
 
         info!(
             device = %config.friendly_name,
@@ -447,17 +496,45 @@ impl DeviceRegistry {
             "Registering mDNS service"
         );
 
-        let mut service_async = MdnsServiceAsync::new(service)
-            .map_err(|e| Error::Mdns(format!("Failed to create async service: {e}")))?;
-
-        service_async
-            .start_with_timeout(std::time::Duration::from_millis(100))
-            .await
-            .map_err(|e| Error::Mdns(format!("Failed to start service: {e}")))?;
+        self.mdns_daemon
+            .register(service_info.clone())
+            .map_err(|e| Error::Mdns(format!("Failed to register mDNS service: {e}")))?;
 
         info!(device = %config.friendly_name, "mDNS service registered");
 
-        Ok(service_async)
+        Ok(service_info)
     }
 }
 
+impl Drop for DeviceRegistry {
+    fn drop(&mut self) {
+        // Unregister each service individually and wait for goodbye packet
+        if let Ok(devices) = self.state.devices.try_read() {
+            for device in devices.values() {
+                if let Ok(receiver) = self
+                    .mdns_daemon
+                    .unregister(device.service_info.get_fullname())
+                {
+                    let _ = receiver.recv_timeout(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        // Then shutdown the daemon
+        if let Ok(receiver) = self.mdns_daemon.shutdown() {
+            let _ = receiver.recv_timeout(std::time::Duration::from_secs(1));
+        }
+    }
+}
+
+/// Get the local IPv4 address (non-loopback).
+fn get_local_ipv4() -> Option<Ipv4Addr> {
+    use std::net::UdpSocket;
+    // Connect to a public address to determine local IP (doesn't actually send data)
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    match addr.ip() {
+        std::net::IpAddr::V4(ip) => Some(ip),
+        _ => None,
+    }
+}
