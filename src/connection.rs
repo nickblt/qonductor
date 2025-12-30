@@ -1,8 +1,8 @@
 //! QConnect WebSocket protocol handling.
 //!
 //! Provides split reader/writer for concurrent message handling:
-//! - `TransportReader` yields individual `QConnectMessage`s via async stream
-//! - `TransportWriter` sends individual `QConnectMessage`s (batched internally)
+//! - `ConnectionReader` yields individual `QConnectMessage`s via async stream
+//! - `ConnectionWriter` sends individual `QConnectMessage`s (batched internally)
 
 use futures::stream::{SplitSink, SplitStream, Stream};
 use futures::{SinkExt, StreamExt};
@@ -28,19 +28,19 @@ use crate::{Error, Result};
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 // ============================================================================
-// Transport (connection setup)
+// Connection (connection setup)
 // ============================================================================
 
-/// WebSocket transport for QConnect protocol.
+/// WebSocket connection for QConnect protocol.
 ///
 /// Use `connect()` to establish a connection, then `split()` to get
 /// separate reader and writer handles for concurrent use.
-pub struct Transport {
+pub struct Connection {
     ws: WsStream,
     msg_id: u32,
 }
 
-impl Transport {
+impl Connection {
     /// Connect to QConnect WebSocket at the given endpoint.
     pub async fn connect(endpoint: &str, jwt: &str) -> Result<Self> {
         debug!(endpoint, "Connecting to WebSocket");
@@ -63,11 +63,11 @@ impl Transport {
     }
 
     /// Split into reader and writer for concurrent use.
-    pub fn split(self) -> (TransportReader, TransportWriter) {
+    pub fn split(self) -> (ConnectionReader, ConnectionWriter) {
         let (sink, stream) = self.ws.split();
         (
-            TransportReader { ws: stream },
-            TransportWriter {
+            ConnectionReader { ws: stream },
+            ConnectionWriter {
                 ws: sink,
                 msg_id: self.msg_id,
             },
@@ -172,17 +172,17 @@ impl Transport {
 }
 
 // ============================================================================
-// TransportReader
+// ConnectionReader
 // ============================================================================
 
-/// Reader half of a split transport.
+/// Reader half of a split connection.
 ///
 /// Convert to a stream of messages with `into_stream()`.
-pub struct TransportReader {
+pub struct ConnectionReader {
     ws: SplitStream<WsStream>,
 }
 
-impl TransportReader {
+impl ConnectionReader {
     /// Convert into an async stream of QConnect messages.
     ///
     /// Messages from batches are yielded one at a time.
@@ -223,18 +223,18 @@ impl TransportReader {
 }
 
 // ============================================================================
-// TransportWriter
+// ConnectionWriter
 // ============================================================================
 
-/// Writer half of a split transport.
+/// Writer half of a split connection.
 ///
 /// Send individual QConnect messages - batching is handled internally.
-pub struct TransportWriter {
+pub struct ConnectionWriter {
     ws: SplitSink<WsStream, WsMessage>,
     msg_id: u32,
 }
 
-impl TransportWriter {
+impl ConnectionWriter {
     /// Send a single QConnectMessage (wrapped in batch internally).
     pub async fn send(&mut self, msg: QConnectMessage) -> Result<()> {
         debug!("TX: {}", format_qconnect_message(&msg));

@@ -6,8 +6,9 @@
 //! Run with debug: RUST_LOG=qonductor=debug,fake_player=debug cargo run --example fake_player
 
 use qonductor::{
-    ActivationState, BufferState, DeviceConfig, LoopMode, PlaybackCommand, PlaybackResponse,
-    PlayingState, QueueTrack, SessionEvent, SessionManager,
+    ActivationState, BroadcastEvent, BufferState, CommandEvent, DeviceConfig, DeviceEvent,
+    LoopMode, PlaybackCommand, PlaybackResponse, PlayingState, QueueTrack, SessionEvent,
+    SessionManager, SystemEvent,
 };
 use rand::{thread_rng, Rng};
 use serde::Deserialize;
@@ -351,95 +352,101 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(event) = session.recv() => {
                 match event {
                     // === Commands (require response) ===
+                    SessionEvent::Command(cmd) => match cmd {
+                        CommandEvent::PlaybackCommand { cmd, respond, .. } => {
+                            let response = player.handle_playback_command(cmd);
+                            respond.send(response);
+                        }
 
-                    SessionEvent::PlaybackCommand { renderer_id: _, cmd, respond } => {
-                        let response = player.handle_playback_command(cmd);
-                        respond.send(response);
-                    }
+                        CommandEvent::Activate { renderer_id, respond } => {
+                            let response = player.handle_activate(renderer_id);
+                            respond.send(response);
+                        }
 
-                    SessionEvent::Activate { renderer_id, respond } => {
-                        let response = player.handle_activate(renderer_id);
-                        respond.send(response);
-                    }
+                        CommandEvent::Heartbeat { respond, .. } => {
+                            let response = player.handle_heartbeat();
+                            respond.send(response);
+                        }
+                    },
 
-                    SessionEvent::Heartbeat { renderer_id: _, respond } => {
-                        let response = player.handle_heartbeat();
-                        respond.send(response);
-                    }
+                    // === Device events (no response needed) ===
+                    SessionEvent::Device(dev) => match dev {
+                        DeviceEvent::Deactivated { renderer_id } => {
+                            player.handle_deactivate(renderer_id);
+                        }
 
-                    // === Events (no response needed) ===
+                        DeviceEvent::QueueUpdated { tracks, version } => {
+                            player.handle_queue_update(tracks, version);
+                        }
 
-                    SessionEvent::Deactivated { renderer_id } => {
-                        player.handle_deactivate(renderer_id);
-                    }
+                        DeviceEvent::LoopModeChanged { mode } => {
+                            info!(?mode, "Loop mode changed");
+                            player.loop_mode = mode;
+                        }
 
-                    SessionEvent::QueueUpdated { tracks, version } => {
-                        player.handle_queue_update(tracks, version);
-                    }
+                        DeviceEvent::ShuffleModeChanged { enabled } => {
+                            info!(enabled, "Shuffle mode changed");
+                            player.shuffle_enabled = enabled;
+                        }
 
-                    SessionEvent::LoopModeChanged { mode } => {
-                        info!(?mode, "Loop mode changed");
-                        player.loop_mode = mode;
-                    }
+                        DeviceEvent::RestoreState { position_ms, queue_index } => {
+                            player.handle_restore_state(position_ms, queue_index);
+                        }
+                    },
 
-                    SessionEvent::ShuffleModeChanged { enabled } => {
-                        info!(enabled, "Shuffle mode changed");
-                        player.shuffle_enabled = enabled;
-                    }
+                    // === System events ===
+                    SessionEvent::System(sys) => match sys {
+                        SystemEvent::Connected => {
+                            info!("WebSocket connected");
+                        }
 
-                    SessionEvent::RestoreState { position_ms, queue_index } => {
-                        player.handle_restore_state(position_ms, queue_index);
-                    }
+                        SystemEvent::Disconnected { reason, .. } => {
+                            info!("Disconnected: {:?}", reason);
+                        }
 
-                    // === Broadcasts (informational) ===
+                        SystemEvent::DeviceRegistered { renderer_id, .. } => {
+                            info!("Device registered with renderer_id={}", renderer_id);
+                        }
 
-                    SessionEvent::Connected => {
-                        info!("WebSocket connected");
-                    }
+                        SystemEvent::SessionClosed { .. } => {
+                            info!("Session closed");
+                        }
+                    },
 
-                    SessionEvent::Disconnected { reason, .. } => {
-                        info!("Disconnected: {:?}", reason);
-                    }
+                    // === Broadcasts (from other renderers) ===
+                    SessionEvent::Broadcast(bc) => match bc {
+                        BroadcastEvent::RendererAdded { renderer_id, name } => {
+                            debug!("Other renderer added: {} (id={})", name, renderer_id);
+                        }
 
-                    SessionEvent::DeviceRegistered { renderer_id, .. } => {
-                        info!("Device registered with renderer_id={}", renderer_id);
-                    }
+                        BroadcastEvent::RendererRemoved { renderer_id } => {
+                            debug!("Renderer removed: id={}", renderer_id);
+                        }
 
-                    SessionEvent::RendererAdded { renderer_id, name } => {
-                        debug!("Other renderer added: {} (id={})", name, renderer_id);
-                    }
+                        BroadcastEvent::ActiveRendererChanged { renderer_id } => {
+                            debug!("Active renderer changed to: {}", renderer_id);
+                        }
 
-                    SessionEvent::RendererRemoved { renderer_id } => {
-                        debug!("Renderer removed: id={}", renderer_id);
-                    }
+                        BroadcastEvent::RendererStateUpdated { renderer_id, state, position_ms, .. } => {
+                            debug!("Renderer {} state broadcast: {:?} at {}ms", renderer_id, state, position_ms);
+                        }
 
-                    SessionEvent::ActiveRendererChanged { renderer_id } => {
-                        debug!("Active renderer changed to: {}", renderer_id);
-                    }
+                        BroadcastEvent::VolumeChanged { renderer_id, volume } => {
+                            debug!("Volume broadcast: renderer {} -> {}", renderer_id, volume);
+                        }
 
-                    SessionEvent::RendererStateUpdated { renderer_id, state, position_ms, .. } => {
-                        debug!("Renderer {} state broadcast: {:?} at {}ms", renderer_id, state, position_ms);
-                    }
+                        BroadcastEvent::VolumeMuted { renderer_id, muted } => {
+                            debug!("Mute broadcast: renderer {} -> {}", renderer_id, muted);
+                        }
 
-                    SessionEvent::VolumeBroadcast { renderer_id, volume } => {
-                        debug!("Volume broadcast: renderer {} -> {}", renderer_id, volume);
-                    }
+                        BroadcastEvent::MaxAudioQualityChanged { renderer_id, quality } => {
+                            debug!("Max quality broadcast: renderer {} -> {:?}", renderer_id, quality);
+                        }
 
-                    SessionEvent::VolumeMutedBroadcast { renderer_id, muted } => {
-                        debug!("Mute broadcast: renderer {} -> {}", renderer_id, muted);
-                    }
-
-                    SessionEvent::MaxAudioQualityBroadcast { renderer_id, quality } => {
-                        debug!("Max quality broadcast: renderer {} -> {:?}", renderer_id, quality);
-                    }
-
-                    SessionEvent::FileAudioQualityBroadcast { renderer_id, sample_rate_hz } => {
-                        debug!("File quality broadcast: renderer {} -> {}Hz", renderer_id, sample_rate_hz);
-                    }
-
-                    SessionEvent::SessionClosed { device_uuid: _ } => {
-                        info!("Session closed");
-                    }
+                        BroadcastEvent::FileAudioQualityChanged { renderer_id, sample_rate_hz } => {
+                            debug!("File quality broadcast: renderer {} -> {}Hz", renderer_id, sample_rate_hz);
+                        }
+                    },
                 }
             }
             _ = signal::ctrl_c() => {

@@ -11,8 +11,8 @@
 //! Run with debug: RUST_LOG=qonductor=debug cargo run --example discovery_server
 
 use qonductor::{
-    ActivationState, BufferState, DeviceConfig, DeviceSession, PlaybackResponse, PlayingState,
-    SessionEvent, SessionManager,
+    ActivationState, BroadcastEvent, BufferState, CommandEvent, DeviceConfig, DeviceEvent,
+    DeviceSession, PlaybackResponse, PlayingState, SessionEvent, SessionManager, SystemEvent,
 };
 use serde::Deserialize;
 use std::fs;
@@ -32,174 +32,180 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
     while let Some(event) = session.recv().await {
         match event {
             // === Commands (require response) ===
-
-            SessionEvent::PlaybackCommand {
-                renderer_id,
-                cmd,
-                respond,
-            } => {
-                println!(
-                    "[{}] Playback command: renderer={} state={:?} position={:?} queue_item={:?}",
-                    device_name, renderer_id, cmd.state, cmd.position_ms, cmd.queue_item_id
-                );
-                respond.send(PlaybackResponse {
-                    state: cmd.state.unwrap_or(PlayingState::Stopped),
-                    buffer_state: BufferState::Ok,
-                    position_ms: cmd.position_ms.unwrap_or(0),
-                    duration_ms: None,
-                    queue_item_id: None,
-                    next_queue_item_id: None,
-                });
-            }
-
-            SessionEvent::Activate { renderer_id, respond } => {
-                println!("[{}] Device activated: renderer_id={}", device_name, renderer_id);
-                respond.send(ActivationState {
-                    muted: false,
-                    volume: 100,
-                    max_quality: 4, // HiRes 192kHz capability level
-                    playback: PlaybackResponse {
-                        state: PlayingState::Stopped,
+            SessionEvent::Command(cmd) => match cmd {
+                CommandEvent::PlaybackCommand {
+                    renderer_id,
+                    cmd,
+                    respond,
+                } => {
+                    println!(
+                        "[{}] Playback command: renderer={} state={:?} position={:?} queue_item={:?}",
+                        device_name, renderer_id, cmd.state, cmd.position_ms, cmd.queue_item_id
+                    );
+                    respond.send(PlaybackResponse {
+                        state: cmd.state.unwrap_or(PlayingState::Stopped),
                         buffer_state: BufferState::Ok,
-                        position_ms: 0,
+                        position_ms: cmd.position_ms.unwrap_or(0),
                         duration_ms: None,
                         queue_item_id: None,
                         next_queue_item_id: None,
-                    },
-                });
-            }
+                    });
+                }
 
-            SessionEvent::Heartbeat { respond, .. } => {
-                respond.send(None); // Not playing, no heartbeat needed
-            }
+                CommandEvent::Activate { renderer_id, respond } => {
+                    println!("[{}] Device activated: renderer_id={}", device_name, renderer_id);
+                    respond.send(ActivationState {
+                        muted: false,
+                        volume: 100,
+                        max_quality: 4, // HiRes 192kHz capability level
+                        playback: PlaybackResponse {
+                            state: PlayingState::Stopped,
+                            buffer_state: BufferState::Ok,
+                            position_ms: 0,
+                            duration_ms: None,
+                            queue_item_id: None,
+                            next_queue_item_id: None,
+                        },
+                    });
+                }
 
-            // === Events (no response needed) ===
+                CommandEvent::Heartbeat { respond, .. } => {
+                    respond.send(None); // Not playing, no heartbeat needed
+                }
+            },
 
-            SessionEvent::Deactivated { renderer_id } => {
-                println!("[{}] Device deactivated: renderer_id={}", device_name, renderer_id);
-            }
+            // === Device events (no response needed) ===
+            SessionEvent::Device(dev) => match dev {
+                DeviceEvent::Deactivated { renderer_id } => {
+                    println!("[{}] Device deactivated: renderer_id={}", device_name, renderer_id);
+                }
 
-            SessionEvent::QueueUpdated { tracks, version } => {
-                println!(
-                    "[{}] Queue updated: {} tracks, version={}.{}",
-                    device_name,
-                    tracks.len(),
-                    version.0,
-                    version.1
-                );
-            }
+                DeviceEvent::QueueUpdated { tracks, version } => {
+                    println!(
+                        "[{}] Queue updated: {} tracks, version={}.{}",
+                        device_name,
+                        tracks.len(),
+                        version.0,
+                        version.1
+                    );
+                }
 
-            SessionEvent::LoopModeChanged { mode } => {
-                println!("[{}] Loop mode changed: {:?}", device_name, mode);
-            }
+                DeviceEvent::LoopModeChanged { mode } => {
+                    println!("[{}] Loop mode changed: {:?}", device_name, mode);
+                }
 
-            SessionEvent::ShuffleModeChanged { enabled } => {
-                println!("[{}] Shuffle mode changed: {}", device_name, enabled);
-            }
+                DeviceEvent::ShuffleModeChanged { enabled } => {
+                    println!("[{}] Shuffle mode changed: {}", device_name, enabled);
+                }
 
-            SessionEvent::RestoreState {
-                position_ms,
-                queue_index,
-            } => {
-                println!(
-                    "[{}] Restore state: position={}ms queue_idx={:?}",
-                    device_name, position_ms, queue_index
-                );
-            }
+                DeviceEvent::RestoreState {
+                    position_ms,
+                    queue_index,
+                } => {
+                    println!(
+                        "[{}] Restore state: position={}ms queue_idx={:?}",
+                        device_name, position_ms, queue_index
+                    );
+                }
+            },
 
-            // === Broadcasts (informational) ===
+            // === System events ===
+            SessionEvent::System(sys) => match sys {
+                SystemEvent::Connected => {
+                    println!("[{}] WebSocket connected!", device_name);
+                }
 
-            SessionEvent::Connected => {
-                println!("[{}] WebSocket connected!", device_name);
-            }
+                SystemEvent::Disconnected { session_id, reason } => {
+                    println!(
+                        "[{}] Disconnected (session {}): {:?}",
+                        device_name, session_id, reason
+                    );
+                }
 
-            SessionEvent::Disconnected { session_id, reason } => {
-                println!(
-                    "[{}] Disconnected (session {}): {:?}",
-                    device_name, session_id, reason
-                );
-            }
+                SystemEvent::DeviceRegistered {
+                    device_uuid,
+                    renderer_id,
+                } => {
+                    println!(
+                        "[{}] Device registered: uuid={} renderer_id={}",
+                        device_name,
+                        Uuid::from_bytes(device_uuid),
+                        renderer_id
+                    );
+                }
 
-            SessionEvent::DeviceRegistered {
-                device_uuid,
-                renderer_id,
-            } => {
-                println!(
-                    "[{}] Device registered: uuid={} renderer_id={}",
-                    device_name,
-                    Uuid::from_bytes(device_uuid),
-                    renderer_id
-                );
-            }
+                SystemEvent::SessionClosed { device_uuid } => {
+                    println!(
+                        "[{}] Session closed: uuid={}",
+                        device_name,
+                        Uuid::from_bytes(device_uuid)
+                    );
+                }
+            },
 
-            SessionEvent::RendererAdded { renderer_id, name } => {
-                println!(
-                    "[{}] Other renderer added: {} (id={})",
-                    device_name, name, renderer_id
-                );
-            }
+            // === Broadcasts (from other renderers) ===
+            SessionEvent::Broadcast(bc) => match bc {
+                BroadcastEvent::RendererAdded { renderer_id, name } => {
+                    println!(
+                        "[{}] Other renderer added: {} (id={})",
+                        device_name, name, renderer_id
+                    );
+                }
 
-            SessionEvent::RendererRemoved { renderer_id } => {
-                println!("[{}] Renderer removed: id={}", device_name, renderer_id);
-            }
+                BroadcastEvent::RendererRemoved { renderer_id } => {
+                    println!("[{}] Renderer removed: id={}", device_name, renderer_id);
+                }
 
-            SessionEvent::ActiveRendererChanged { renderer_id } => {
-                println!(
-                    "[{}] Active renderer changed to id={}",
-                    device_name, renderer_id
-                );
-            }
+                BroadcastEvent::ActiveRendererChanged { renderer_id } => {
+                    println!(
+                        "[{}] Active renderer changed to id={}",
+                        device_name, renderer_id
+                    );
+                }
 
-            SessionEvent::RendererStateUpdated {
-                renderer_id,
-                state,
-                position_ms,
-                ..
-            } => {
-                println!(
-                    "[{}] Renderer state: id={} state={:?} pos={}ms",
-                    device_name, renderer_id, state, position_ms
-                );
-            }
+                BroadcastEvent::RendererStateUpdated {
+                    renderer_id,
+                    state,
+                    position_ms,
+                    ..
+                } => {
+                    println!(
+                        "[{}] Renderer state: id={} state={:?} pos={}ms",
+                        device_name, renderer_id, state, position_ms
+                    );
+                }
 
-            SessionEvent::VolumeBroadcast { renderer_id, volume } => {
-                println!(
-                    "[{}] Volume broadcast: renderer={} volume={}",
-                    device_name, renderer_id, volume
-                );
-            }
+                BroadcastEvent::VolumeChanged { renderer_id, volume } => {
+                    println!(
+                        "[{}] Volume broadcast: renderer={} volume={}",
+                        device_name, renderer_id, volume
+                    );
+                }
 
-            SessionEvent::VolumeMutedBroadcast { renderer_id, muted } => {
-                println!(
-                    "[{}] Mute broadcast: renderer={} muted={}",
-                    device_name, renderer_id, muted
-                );
-            }
+                BroadcastEvent::VolumeMuted { renderer_id, muted } => {
+                    println!(
+                        "[{}] Mute broadcast: renderer={} muted={}",
+                        device_name, renderer_id, muted
+                    );
+                }
 
-            SessionEvent::MaxAudioQualityBroadcast { renderer_id, quality } => {
-                println!(
-                    "[{}] Max quality broadcast: renderer={} quality={:?}",
-                    device_name, renderer_id, quality
-                );
-            }
+                BroadcastEvent::MaxAudioQualityChanged { renderer_id, quality } => {
+                    println!(
+                        "[{}] Max quality broadcast: renderer={} quality={:?}",
+                        device_name, renderer_id, quality
+                    );
+                }
 
-            SessionEvent::FileAudioQualityBroadcast {
-                renderer_id,
-                sample_rate_hz,
-            } => {
-                println!(
-                    "[{}] File quality broadcast: renderer={} rate={}Hz",
-                    device_name, renderer_id, sample_rate_hz
-                );
-            }
-
-            SessionEvent::SessionClosed { device_uuid } => {
-                println!(
-                    "[{}] Session closed: uuid={}",
-                    device_name,
-                    Uuid::from_bytes(device_uuid)
-                );
-            }
+                BroadcastEvent::FileAudioQualityChanged {
+                    renderer_id,
+                    sample_rate_hz,
+                } => {
+                    println!(
+                        "[{}] File quality broadcast: renderer={} rate={}Hz",
+                        device_name, renderer_id, sample_rate_hz
+                    );
+                }
+            },
         }
     }
 }

@@ -23,7 +23,7 @@ use crate::proto::qconnect::{
     QueueVersion, RndrSrvrFileAudioQualityChanged, RndrSrvrMaxAudioQualityChanged,
     RndrSrvrStateUpdated, RndrSrvrVolumeChanged, RndrSrvrVolumeMuted,
 };
-use crate::transport::{Transport, TransportWriter};
+use crate::connection::{Connection, ConnectionWriter};
 use crate::Result;
 
 // ============================================================================
@@ -251,39 +251,15 @@ pub struct QueueTrack {
     pub queue_item_id: u64,
 }
 
-/// Events from a Qobuz Connect session.
+// ============================================================================
+// Event Categories
+// ============================================================================
+
+/// Commands from the server that require a response via Responder.
 ///
-/// Receive these via the event channel returned from `SessionManager::start()`.
-///
-/// Events with a `respond` field require a response - call `respond.send(value)`
-/// to provide the response. Events without a `respond` field are informational.
-///
-/// # Example
-///
-/// ```ignore
-/// while let Some(event) = events.recv().await {
-///     match event {
-///         // Commands - must respond
-///         SessionEvent::PlaybackCommand { renderer_id, cmd, respond } => {
-///             let response = my_player.handle_playback(cmd);
-///             respond.send(response);
-///         }
-///         SessionEvent::Activate { renderer_id, respond } => {
-///             respond.send(ActivationState { ... });
-///         }
-///
-///         // Events - no response needed
-///         SessionEvent::QueueUpdated { tracks, .. } => {
-///             my_player.queue = tracks;
-///         }
-///         SessionEvent::Connected => println!("Connected!"),
-///
-///         _ => {}
-///     }
-/// }
-/// ```
-pub enum SessionEvent {
-    // === Commands (require response) ===
+/// These events must be responded to - call `respond.send(value)` to provide
+/// the response. The session will hang if you don't respond.
+pub enum CommandEvent {
     /// Server commands play/pause/seek. Must respond with `PlaybackResponse`.
     PlaybackCommand {
         renderer_id: u64,
@@ -303,8 +279,10 @@ pub enum SessionEvent {
         renderer_id: u64,
         respond: Responder<Option<PlaybackResponse>>,
     },
+}
 
-    // === Events (no response needed) ===
+/// Events about this device's state (no response needed).
+pub enum DeviceEvent {
     /// Device was deactivated.
     Deactivated { renderer_id: u64 },
 
@@ -325,8 +303,10 @@ pub enum SessionEvent {
         position_ms: u32,
         queue_index: Option<u32>,
     },
+}
 
-    // === Broadcasts (informational) ===
+/// System-level connection events.
+pub enum SystemEvent {
     /// WebSocket connected successfully.
     Connected,
 
@@ -342,6 +322,15 @@ pub enum SessionEvent {
         renderer_id: u64,
     },
 
+    /// Session closed (WebSocket disconnected or error).
+    SessionClosed { device_uuid: [u8; 16] },
+}
+
+/// Broadcasts from other renderers in the session.
+///
+/// These are informational updates about other devices in the same
+/// Qobuz Connect session. No response is needed.
+pub enum BroadcastEvent {
     /// Another renderer was added to the session.
     RendererAdded { renderer_id: u64, name: String },
 
@@ -361,22 +350,92 @@ pub enum SessionEvent {
     },
 
     /// Volume changed broadcast.
-    VolumeBroadcast { renderer_id: u64, volume: u32 },
+    VolumeChanged { renderer_id: u64, volume: u32 },
 
     /// Volume muted broadcast.
-    VolumeMutedBroadcast { renderer_id: u64, muted: bool },
+    VolumeMuted { renderer_id: u64, muted: bool },
 
     /// Max audio quality changed broadcast (capability level).
-    MaxAudioQualityBroadcast { renderer_id: u64, quality: i32 },
+    MaxAudioQualityChanged { renderer_id: u64, quality: i32 },
 
     /// File audio quality changed broadcast.
-    FileAudioQualityBroadcast {
+    FileAudioQualityChanged {
         renderer_id: u64,
         sample_rate_hz: u32,
     },
+}
 
-    /// Session closed (WebSocket disconnected or error).
-    SessionClosed { device_uuid: [u8; 16] },
+// ============================================================================
+// Unified SessionEvent
+// ============================================================================
+
+/// Events from a Qobuz Connect session.
+///
+/// Events are categorized by type:
+/// - `Command`: Server commands requiring a response via `Responder`
+/// - `Device`: State changes for this device (no response needed)
+/// - `System`: Connection lifecycle events
+/// - `Broadcast`: Updates from other renderers in the session
+///
+/// # Example
+///
+/// ```ignore
+/// use qonductor::{SessionEvent, CommandEvent, DeviceEvent, SystemEvent};
+///
+/// while let Some(event) = session.recv().await {
+///     match event {
+///         // Commands - must respond
+///         SessionEvent::Command(CommandEvent::PlaybackCommand { cmd, respond, .. }) => {
+///             let response = my_player.handle_playback(cmd);
+///             respond.send(response);
+///         }
+///         SessionEvent::Command(CommandEvent::Activate { respond, .. }) => {
+///             respond.send(ActivationState { ... });
+///         }
+///
+///         // Device events - no response needed
+///         SessionEvent::Device(DeviceEvent::QueueUpdated { tracks, .. }) => {
+///             my_player.queue = tracks;
+///         }
+///
+///         // System events
+///         SessionEvent::System(SystemEvent::Connected) => println!("Connected!"),
+///
+///         _ => {}
+///     }
+/// }
+/// ```
+pub enum SessionEvent {
+    /// Server commands requiring a response.
+    Command(CommandEvent),
+    /// State changes for this device.
+    Device(DeviceEvent),
+    /// Connection lifecycle events.
+    System(SystemEvent),
+    /// Updates from other renderers.
+    Broadcast(BroadcastEvent),
+}
+
+impl SessionEvent {
+    /// Returns true if this is a command event requiring a response.
+    pub fn is_command(&self) -> bool {
+        matches!(self, Self::Command(_))
+    }
+
+    /// Returns true if this is a device state event.
+    pub fn is_device(&self) -> bool {
+        matches!(self, Self::Device(_))
+    }
+
+    /// Returns true if this is a system/connection event.
+    pub fn is_system(&self) -> bool {
+        matches!(self, Self::System(_))
+    }
+
+    /// Returns true if this is a broadcast from another renderer.
+    pub fn is_broadcast(&self) -> bool {
+        matches!(self, Self::Broadcast(_))
+    }
 }
 
 /// Connect to Qobuz WebSocket and spawn a session runner task.
@@ -397,18 +456,18 @@ pub(crate) async fn spawn_session(
     );
 
     // Connect and set up the WebSocket
-    let mut transport =
-        Transport::connect(&session_info.ws_endpoint, &session_info.ws_jwt).await?;
-    transport.subscribe_default().await?;
-    transport
+    let mut connection =
+        Connection::connect(&session_info.ws_endpoint, &session_info.ws_jwt).await?;
+    connection.subscribe_default().await?;
+    connection
         .join_session(&device_config.device_uuid, &device_config.friendly_name)
         .await?;
 
     // Split into reader/writer
-    let (reader, writer) = transport.split();
+    let (reader, writer) = connection.split();
     let reader = Box::pin(reader.into_stream());
 
-    let _ = event_tx.send(SessionEvent::Connected).await;
+    let _ = event_tx.send(SessionEvent::System(SystemEvent::Connected)).await;
 
     // Create and spawn the runner
     let runner = SessionRunner {
@@ -458,7 +517,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 struct SessionRunner {
     session_id: String,
     reader: Pin<Box<dyn Stream<Item = Result<QConnectMessage>> + Send>>,
-    writer: TransportWriter,
+    writer: ConnectionWriter,
     device_uuid: [u8; 16],
     device_name: String,
     renderer_id: u64,
@@ -490,18 +549,18 @@ impl SessionRunner {
                         }
                         Some(Err(e)) => {
                             warn!(error = %e, "WebSocket error");
-                            let _ = self.event_tx.send(SessionEvent::Disconnected {
+                            let _ = self.event_tx.send(SessionEvent::System(SystemEvent::Disconnected {
                                 session_id: self.session_id.clone(),
                                 reason: Some(e.to_string()),
-                            }).await;
+                            })).await;
                             break;
                         }
                         None => {
                             info!("WebSocket closed");
-                            let _ = self.event_tx.send(SessionEvent::Disconnected {
+                            let _ = self.event_tx.send(SessionEvent::System(SystemEvent::Disconnected {
                                 session_id: self.session_id.clone(),
                                 reason: None,
-                            }).await;
+                            })).await;
                             break;
                         }
                     }
@@ -511,10 +570,10 @@ impl SessionRunner {
                 _ = heartbeat.tick() => {
                     if self.is_active && self.renderer_id != 0 {
                         let (tx, rx) = oneshot::channel();
-                        let _ = self.event_tx.send(SessionEvent::Heartbeat {
+                        let _ = self.event_tx.send(SessionEvent::Command(CommandEvent::Heartbeat {
                             renderer_id: self.renderer_id,
                             respond: Responder::new(tx),
-                        }).await;
+                        })).await;
                         if let Ok(Some(resp)) = rx.await
                             && let Err(e) = self.send_playback_response(&resp).await
                         {
@@ -541,9 +600,9 @@ impl SessionRunner {
         }
 
         // Notify manager that session is done
-        let _ = self.event_tx.send(SessionEvent::SessionClosed {
+        let _ = self.event_tx.send(SessionEvent::System(SystemEvent::SessionClosed {
             device_uuid: self.device_uuid,
-        }).await;
+        })).await;
         info!(session_id = %self.session_id, "Session runner stopped");
     }
 
@@ -721,10 +780,10 @@ impl SessionRunner {
 
                         let _ = self
                             .event_tx
-                            .send(SessionEvent::DeviceRegistered {
+                            .send(SessionEvent::System(SystemEvent::DeviceRegistered {
                                 device_uuid: self.device_uuid,
                                 renderer_id: rid,
-                            })
+                            }))
                             .await;
 
                         // Declare as active renderer
@@ -741,10 +800,10 @@ impl SessionRunner {
                     } else {
                         let _ = self
                             .event_tx
-                            .send(SessionEvent::RendererAdded {
+                            .send(SessionEvent::Broadcast(BroadcastEvent::RendererAdded {
                                 renderer_id: rid,
                                 name,
-                            })
+                            }))
                             .await;
                     }
                 }
@@ -762,7 +821,7 @@ impl SessionRunner {
 
                     let _ = self
                         .event_tx
-                        .send(SessionEvent::RendererRemoved { renderer_id: rid })
+                        .send(SessionEvent::Broadcast(BroadcastEvent::RendererRemoved { renderer_id: rid }))
                         .await;
                 }
             }
@@ -803,7 +862,7 @@ impl SessionRunner {
 
                     let _ = self
                         .event_tx
-                        .send(SessionEvent::ActiveRendererChanged { renderer_id: rid })
+                        .send(SessionEvent::Broadcast(BroadcastEvent::ActiveRendererChanged { renderer_id: rid }))
                         .await;
                 }
             }
@@ -831,10 +890,10 @@ impl SessionRunner {
                         .collect();
 
                     // Send queue update event
-                    let _ = self.event_tx.send(SessionEvent::QueueUpdated {
+                    let _ = self.event_tx.send(SessionEvent::Device(DeviceEvent::QueueUpdated {
                         tracks,
                         version,
-                    }).await;
+                    })).await;
                 }
             }
 
@@ -867,11 +926,11 @@ impl SessionRunner {
                             queue_item_id,
                         };
                         let (tx, rx) = oneshot::channel();
-                        let _ = self.event_tx.send(SessionEvent::PlaybackCommand {
+                        let _ = self.event_tx.send(SessionEvent::Command(CommandEvent::PlaybackCommand {
                             renderer_id: self.renderer_id,
                             cmd,
                             respond: Responder::new(tx),
-                        }).await;
+                        })).await;
                         if let Ok(response) = rx.await
                             && let Err(e) = self.send_playback_response(&response).await
                         {
@@ -895,10 +954,10 @@ impl SessionRunner {
                         // SrvrRndrSetState with the current position, and we respond to that.
                         // This matches the C++ implementation behavior.
                         let (tx, rx) = oneshot::channel();
-                        let _ = self.event_tx.send(SessionEvent::Activate {
+                        let _ = self.event_tx.send(SessionEvent::Command(CommandEvent::Activate {
                             renderer_id: self.renderer_id,
                             respond: Responder::new(tx),
-                        }).await;
+                        })).await;
                         if let Ok(activation_state) = rx.await
                             && let Err(e) = self.send_activation_handshake(&activation_state).await
                         {
@@ -917,18 +976,18 @@ impl SessionRunner {
                         self.is_active = false;
 
                         // Send deactivated event
-                        let _ = self.event_tx.send(SessionEvent::Deactivated {
+                        let _ = self.event_tx.send(SessionEvent::Device(DeviceEvent::Deactivated {
                             renderer_id: self.renderer_id,
-                        }).await;
+                        })).await;
 
                         // Close WebSocket and signal run loop to exit
                         let _ = self.writer.close().await;
                         let _ = self
                             .event_tx
-                            .send(SessionEvent::Disconnected {
+                            .send(SessionEvent::System(SystemEvent::Disconnected {
                                 session_id: self.session_id.clone(),
                                 reason: Some("Server set inactive".to_string()),
-                            })
+                            }))
                             .await;
                         return Ok(true);
                     }
@@ -943,10 +1002,10 @@ impl SessionRunner {
 
                     let _ = self
                         .event_tx
-                        .send(SessionEvent::VolumeBroadcast {
+                        .send(SessionEvent::Broadcast(BroadcastEvent::VolumeChanged {
                             renderer_id: rid,
                             volume,
-                        })
+                        }))
                         .await;
                 }
             }
@@ -957,9 +1016,9 @@ impl SessionRunner {
                     let enabled = sm.shuffle_on.unwrap_or(false);
 
                     // Send shuffle mode event
-                    let _ = self.event_tx.send(SessionEvent::ShuffleModeChanged {
+                    let _ = self.event_tx.send(SessionEvent::Device(DeviceEvent::ShuffleModeChanged {
                         enabled,
-                    }).await;
+                    })).await;
                 }
             }
 
@@ -972,9 +1031,9 @@ impl SessionRunner {
                         .unwrap_or_default();
 
                     // Send loop mode event
-                    let _ = self.event_tx.send(SessionEvent::LoopModeChanged {
+                    let _ = self.event_tx.send(SessionEvent::Device(DeviceEvent::LoopModeChanged {
                         mode,
-                    }).await;
+                    })).await;
                 }
             }
 
@@ -986,10 +1045,10 @@ impl SessionRunner {
 
                     let _ = self
                         .event_tx
-                        .send(SessionEvent::VolumeMutedBroadcast {
+                        .send(SessionEvent::Broadcast(BroadcastEvent::VolumeMuted {
                             renderer_id: rid,
                             muted,
-                        })
+                        }))
                         .await;
                 }
             }
@@ -1002,10 +1061,10 @@ impl SessionRunner {
                     // This broadcast doesn't include renderer_id; applies to active renderer
                     let _ = self
                         .event_tx
-                        .send(SessionEvent::MaxAudioQualityBroadcast {
+                        .send(SessionEvent::Broadcast(BroadcastEvent::MaxAudioQualityChanged {
                             renderer_id: self.renderer_id,
                             quality,
-                        })
+                        }))
                         .await;
                 }
             }
@@ -1019,10 +1078,10 @@ impl SessionRunner {
                     // This broadcast doesn't include renderer_id; applies to active renderer
                     let _ = self
                         .event_tx
-                        .send(SessionEvent::FileAudioQualityBroadcast {
+                        .send(SessionEvent::Broadcast(BroadcastEvent::FileAudioQualityChanged {
                             renderer_id: self.renderer_id,
                             sample_rate_hz,
-                        })
+                        }))
                         .await;
                 }
             }
@@ -1049,21 +1108,21 @@ impl SessionRunner {
                             } else {
                                 None
                             };
-                            let _ = self.event_tx.send(SessionEvent::RestoreState {
+                            let _ = self.event_tx.send(SessionEvent::Device(DeviceEvent::RestoreState {
                                 position_ms,
                                 queue_index: queue_idx,
-                            }).await;
+                            })).await;
                         }
 
                         let _ = self
                             .event_tx
-                            .send(SessionEvent::RendererStateUpdated {
+                            .send(SessionEvent::Broadcast(BroadcastEvent::RendererStateUpdated {
                                 renderer_id: rid,
                                 state: play_state,
                                 position_ms,
                                 duration_ms,
                                 queue_index,
-                            })
+                            }))
                             .await;
                     }
                 }

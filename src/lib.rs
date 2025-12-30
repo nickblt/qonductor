@@ -40,20 +40,20 @@ pub mod manager;
 pub mod types;
 
 // Internal modules
+pub(crate) mod connection;
 pub(crate) mod discovery;
 pub(crate) mod qconnect;
-pub(crate) mod transport;
 
 // Re-export main public API
 pub use manager::SessionManager;
 pub use qconnect::{
-    ActivationState, DeviceSession, PlaybackCommand, PlaybackResponse, QueueTrack, Responder,
-    SessionCommand, SessionEvent,
+    ActivationState, BroadcastEvent, CommandEvent, DeviceEvent, DeviceSession, PlaybackCommand,
+    PlaybackResponse, QueueTrack, Responder, SessionCommand, SessionEvent, SystemEvent,
 };
 pub use proto::qconnect::{BufferState, DeviceType, LoopMode, PlayingState};
 pub use config::{AudioQuality, DeviceConfig};
 pub use discovery::DeviceTypeExt;
-pub use transport::format_qconnect_message;
+pub use connection::format_qconnect_message;
 
 pub use error::Error;
 pub use types::*;
