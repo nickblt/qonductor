@@ -320,6 +320,8 @@ pub enum SystemEvent {
     DeviceRegistered {
         device_uuid: [u8; 16],
         renderer_id: u64,
+        /// JWT token for Qobuz API authentication (for streaming URLs).
+        api_jwt: String,
     },
 
     /// Session closed (WebSocket disconnected or error).
@@ -481,6 +483,7 @@ pub(crate) async fn spawn_session(
         event_tx,
         command_rx,
         state: SessionState::default(),
+        api_jwt: session_info.api_jwt.clone(),
     };
 
     tokio::spawn(async move {
@@ -525,6 +528,7 @@ struct SessionRunner {
     event_tx: mpsc::Sender<SessionEvent>,
     command_rx: mpsc::Receiver<SessionCommand>,
     state: SessionState,
+    api_jwt: String,
 }
 
 impl SessionRunner {
@@ -783,6 +787,7 @@ impl SessionRunner {
                             .send(SessionEvent::System(SystemEvent::DeviceRegistered {
                                 device_uuid: self.device_uuid,
                                 renderer_id: rid,
+                                api_jwt: self.api_jwt.clone(),
                             }))
                             .await;
 

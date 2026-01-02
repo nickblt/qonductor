@@ -102,7 +102,6 @@ pub(crate) struct SessionInfo {
     #[allow(dead_code)]
     pub ws_jwt_exp: u64,
     /// JWT token for API authentication (for streaming URLs).
-    #[allow(dead_code)]
     pub api_jwt: String,
     /// API JWT expiration timestamp.
     #[allow(dead_code)]
