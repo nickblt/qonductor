@@ -22,8 +22,9 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::config::{AudioQuality, DeviceConfig, SessionInfo};
+use crate::event::SessionEvent;
 use crate::proto::qconnect::DeviceType;
-use crate::qconnect::{DeviceSession, SessionEvent, SharedCommandTx};
+use crate::session::{DeviceSession, SharedCommandTx};
 use crate::{Error, Result};
 
 /// QConnect SDK version to advertise via mDNS.
@@ -504,25 +505,32 @@ impl DeviceRegistry {
 
         Ok(service_info)
     }
-}
 
-impl Drop for DeviceRegistry {
-    fn drop(&mut self) {
-        // Unregister each service individually and wait for goodbye packet
-        if let Ok(devices) = self.state.devices.try_read() {
-            for device in devices.values() {
-                if let Ok(receiver) = self
-                    .mdns_daemon
-                    .unregister(device.service_info.get_fullname())
-                {
-                    let _ = receiver.recv_timeout(std::time::Duration::from_millis(100));
-                }
+    /// Gracefully shutdown the registry, unregistering all mDNS services.
+    ///
+    /// This sends mDNS goodbye packets so devices disappear from controllers.
+    /// Call this before dropping the registry for clean shutdown.
+    pub async fn shutdown(&self) {
+        info!("Shutting down device registry");
+
+        let devices = self.state.devices.read().await;
+        for device in devices.values() {
+            info!(device = %device.config.friendly_name, "Unregistering mDNS service");
+            if let Ok(receiver) = self
+                .mdns_daemon
+                .unregister(device.service_info.get_fullname())
+            {
+                // Wait for goodbye packet to be sent
+                let _ = receiver.recv_timeout(Duration::from_millis(200));
             }
         }
-        // Then shutdown the daemon
+        drop(devices);
+
+        // Shutdown the daemon
         if let Ok(receiver) = self.mdns_daemon.shutdown() {
-            let _ = receiver.recv_timeout(std::time::Duration::from_secs(1));
+            let _ = receiver.recv_timeout(Duration::from_secs(1));
         }
+        info!("Device registry shutdown complete");
     }
 }
 

@@ -8,7 +8,8 @@ use tracing::{error, info, warn};
 
 use crate::config::DeviceConfig;
 use crate::discovery::{DeviceRegistry, DeviceSelected};
-use crate::qconnect::{spawn_session, DeviceSession};
+use crate::qconnect::spawn_session;
+use crate::session::DeviceSession;
 use crate::{Error, Result};
 
 /// Manager for Qobuz Connect sessions.
@@ -105,6 +106,13 @@ impl SessionManager {
     /// Get all registered device configurations.
     pub async fn devices(&self) -> Vec<DeviceConfig> {
         self.registry.devices().await
+    }
+
+    /// Gracefully shutdown the manager, unregistering all mDNS services.
+    ///
+    /// This sends mDNS goodbye packets so devices disappear from controllers.
+    pub async fn shutdown(&self) {
+        self.registry.shutdown().await;
     }
 
     /// Run the manager event loop.

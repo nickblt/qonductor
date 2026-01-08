@@ -11,12 +11,14 @@
 //! Run with debug: RUST_LOG=qonductor=debug cargo run --example discovery_server
 
 use qonductor::{
-    ActivationState, BroadcastEvent, BufferState, CommandEvent, DeviceConfig, DeviceEvent,
-    DeviceSession, PlaybackResponse, PlayingState, SessionEvent, SessionManager, SystemEvent,
+    msg, ActivationState, BufferState, Command, DeviceConfig, DeviceSession, Notification,
+    PlayingState, SessionEvent, SessionManager,
+    msg::{PositionExt, QueueRendererStateExt, SetStateExt, LoopModeSetExt},
 };
 use serde::Deserialize;
 use std::fs;
 use tokio::signal;
+use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -33,96 +35,139 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
         match event {
             // === Commands (require response) ===
             SessionEvent::Command(cmd) => match cmd {
-                CommandEvent::PlaybackCommand {
-                    renderer_id,
-                    cmd,
-                    respond,
-                } => {
+                Command::SetState { cmd, respond } => {
+                    let position_ms = cmd.current_position;
+                    let queue_item_id = cmd.current_queue_item.as_ref().and_then(|q| q.queue_item_id);
+
                     println!(
-                        "[{}] Playback command: renderer={} state={:?} position={:?} queue_item={:?}",
-                        device_name, renderer_id, cmd.state, cmd.position_ms, cmd.queue_item_id
+                        "[{}] Playback command: state={:?} position={:?} queue_item={:?}",
+                        device_name, cmd.state(), position_ms, queue_item_id
                     );
-                    respond.send(PlaybackResponse {
-                        state: cmd.state.unwrap_or(PlayingState::Stopped),
-                        buffer_state: BufferState::Ok,
-                        position_ms: cmd.position_ms.unwrap_or(0),
-                        duration_ms: None,
-                        queue_item_id: None,
-                        next_queue_item_id: None,
-                    });
+
+                    let mut response = msg::QueueRendererState {
+                        current_position: Some(msg::Position::now(position_ms.unwrap_or(0))),
+                        ..Default::default()
+                    };
+                    response
+                        .set_state(cmd.state().unwrap_or(PlayingState::Stopped))
+                        .set_buffer(BufferState::Ok);
+                    respond.send(response);
                 }
 
-                CommandEvent::Activate { renderer_id, respond } => {
-                    println!("[{}] Device activated: renderer_id={}", device_name, renderer_id);
+                Command::SetActive { cmd: _, respond } => {
+                    println!("[{}] Device activated", device_name);
+                    let mut playback = msg::QueueRendererState {
+                        current_position: Some(msg::Position::now(0)),
+                        ..Default::default()
+                    };
+                    playback.set_state(PlayingState::Stopped).set_buffer(BufferState::Ok);
                     respond.send(ActivationState {
                         muted: false,
                         volume: 100,
-                        max_quality: 4, // HiRes 192kHz capability level
-                        playback: PlaybackResponse {
-                            state: PlayingState::Stopped,
-                            buffer_state: BufferState::Ok,
-                            position_ms: 0,
-                            duration_ms: None,
-                            queue_item_id: None,
-                            next_queue_item_id: None,
-                        },
+                        max_quality: 4,
+                        playback,
                     });
                 }
 
-                CommandEvent::Heartbeat { respond, .. } => {
+                Command::Heartbeat { respond, .. } => {
                     respond.send(None); // Not playing, no heartbeat needed
                 }
             },
 
-            // === Device events (no response needed) ===
-            SessionEvent::Device(dev) => match dev {
-                DeviceEvent::Deactivated { renderer_id } => {
-                    println!("[{}] Device deactivated: renderer_id={}", device_name, renderer_id);
-                }
-
-                DeviceEvent::QueueUpdated { tracks, version } => {
+            // === Notifications (informational) ===
+            SessionEvent::Notification(n) => match n {
+                Notification::QueueState(queue) => {
+                    let version = queue
+                        .queue_version
+                        .map(|v| (v.major.unwrap_or(0), v.minor.unwrap_or(0)))
+                        .unwrap_or((0, 0));
                     println!(
                         "[{}] Queue updated: {} tracks, version={}.{}",
                         device_name,
-                        tracks.len(),
+                        queue.tracks.len(),
                         version.0,
                         version.1
                     );
                 }
 
-                DeviceEvent::LoopModeChanged { mode } => {
-                    println!("[{}] Loop mode changed: {:?}", device_name, mode);
+                Notification::QueueTracksAdded(added) => {
+                    println!(
+                        "[{}] Queue tracks added: {} tracks",
+                        device_name,
+                        added.tracks.len()
+                    );
                 }
 
-                DeviceEvent::ShuffleModeChanged { enabled } => {
-                    println!("[{}] Shuffle mode changed: {}", device_name, enabled);
+                Notification::QueueTracksInserted(inserted) => {
+                    println!(
+                        "[{}] Queue tracks inserted: {} tracks at {:?}",
+                        device_name,
+                        inserted.tracks.len(),
+                        inserted.insert_after
+                    );
                 }
 
-                DeviceEvent::RestoreState {
-                    position_ms,
-                    queue_index,
-                } => {
+                Notification::QueueTracksRemoved(removed) => {
+                    println!(
+                        "[{}] Queue tracks removed: {} items",
+                        device_name,
+                        removed.queue_item_ids.len()
+                    );
+                }
+
+                Notification::QueueTracksReordered(reordered) => {
+                    println!(
+                        "[{}] Queue tracks reordered: {} items",
+                        device_name,
+                        reordered.queue_item_ids.len()
+                    );
+                }
+
+                Notification::LoopModeSet(lm) => {
+                    println!("[{}] Loop mode changed: {:?}", device_name, lm.loop_mode());
+                }
+
+                Notification::ShuffleModeSet(sm) => {
+                    println!(
+                        "[{}] Shuffle mode changed: {}",
+                        device_name,
+                        sm.shuffle_on.unwrap_or(false)
+                    );
+                }
+
+                Notification::Deactivated => {
+                    println!("[{}] Device deactivated", device_name);
+                }
+
+                Notification::RestoreState(rsu) => {
+                    let position_ms = rsu
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.current_position.as_ref())
+                        .and_then(|p| p.value)
+                        .unwrap_or(0);
+                    let queue_index = rsu
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.current_queue_index);
                     println!(
                         "[{}] Restore state: position={}ms queue_idx={:?}",
                         device_name, position_ms, queue_index
                     );
                 }
-            },
 
-            // === System events ===
-            SessionEvent::System(sys) => match sys {
-                SystemEvent::Connected => {
+                Notification::Connected => {
                     println!("[{}] WebSocket connected!", device_name);
                 }
 
-                SystemEvent::Disconnected { session_id, reason } => {
+                Notification::Disconnected { session_id, reason } => {
                     println!(
                         "[{}] Disconnected (session {}): {:?}",
                         device_name, session_id, reason
                     );
                 }
 
-                SystemEvent::DeviceRegistered {
+                Notification::DeviceRegistered {
                     device_uuid,
                     renderer_id,
                     api_jwt,
@@ -136,76 +181,16 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
                     );
                 }
 
-                SystemEvent::SessionClosed { device_uuid } => {
+                Notification::SessionClosed { device_uuid } => {
                     println!(
                         "[{}] Session closed: uuid={}",
                         device_name,
                         Uuid::from_bytes(device_uuid)
                     );
                 }
-            },
 
-            // === Broadcasts (from other renderers) ===
-            SessionEvent::Broadcast(bc) => match bc {
-                BroadcastEvent::RendererAdded { renderer_id, name } => {
-                    println!(
-                        "[{}] Other renderer added: {} (id={})",
-                        device_name, name, renderer_id
-                    );
-                }
-
-                BroadcastEvent::RendererRemoved { renderer_id } => {
-                    println!("[{}] Renderer removed: id={}", device_name, renderer_id);
-                }
-
-                BroadcastEvent::ActiveRendererChanged { renderer_id } => {
-                    println!(
-                        "[{}] Active renderer changed to id={}",
-                        device_name, renderer_id
-                    );
-                }
-
-                BroadcastEvent::RendererStateUpdated {
-                    renderer_id,
-                    state,
-                    position_ms,
-                    ..
-                } => {
-                    println!(
-                        "[{}] Renderer state: id={} state={:?} pos={}ms",
-                        device_name, renderer_id, state, position_ms
-                    );
-                }
-
-                BroadcastEvent::VolumeChanged { renderer_id, volume } => {
-                    println!(
-                        "[{}] Volume broadcast: renderer={} volume={}",
-                        device_name, renderer_id, volume
-                    );
-                }
-
-                BroadcastEvent::VolumeMuted { renderer_id, muted } => {
-                    println!(
-                        "[{}] Mute broadcast: renderer={} muted={}",
-                        device_name, renderer_id, muted
-                    );
-                }
-
-                BroadcastEvent::MaxAudioQualityChanged { renderer_id, quality } => {
-                    println!(
-                        "[{}] Max quality broadcast: renderer={} quality={:?}",
-                        device_name, renderer_id, quality
-                    );
-                }
-
-                BroadcastEvent::FileAudioQualityChanged {
-                    renderer_id,
-                    sample_rate_hz,
-                } => {
-                    println!(
-                        "[{}] File quality broadcast: renderer={} rate={}Hz",
-                        device_name, renderer_id, sample_rate_hz
-                    );
+                other => {
+                    debug!("[{}] Unhandled notification: {:?}", device_name, other);
                 }
             },
         }
@@ -248,6 +233,7 @@ async fn main() {
     // Register multiple devices, each with its own event handler
     let devices = vec!["Living Room Speaker", "Kitchen Speaker", "Bedroom Speaker"];
 
+    let mut device_handles = Vec::new();
     for name in &devices {
         let config = DeviceConfig::new(*name, &creds.app_id);
         let session = manager.add_device(config).await.unwrap();
@@ -255,22 +241,28 @@ async fn main() {
 
         // Spawn a task to handle events for this device
         let device_name = name.to_string();
-        tokio::spawn(handle_device_events(device_name, session));
+        device_handles.push(tokio::spawn(handle_device_events(device_name, session)));
     }
 
     println!("\nDiscovery server running. Press Ctrl+C to stop.");
     println!("Open the Qobuz app and you should see these devices in the Connect menu.\n");
 
-    // Spawn manager in background
-    let manager_handle = tokio::spawn(async move {
-        if let Err(e) = manager.run().await {
-            eprintln!("Manager error: {e}");
+    // Run manager until Ctrl+C
+    tokio::select! {
+        result = manager.run() => {
+            if let Err(e) = result {
+                eprintln!("Manager error: {e}");
+            }
         }
-    });
+        _ = signal::ctrl_c() => {
+            println!("\nShutting down...");
+        }
+    }
 
-    // Wait for shutdown signal
-    signal::ctrl_c().await.unwrap();
-    println!("\nShutting down...");
+    // Clean shutdown: unregister mDNS services first
+    manager.shutdown().await;
 
-    manager_handle.abort();
+    for handle in device_handles {
+        handle.abort();
+    }
 }

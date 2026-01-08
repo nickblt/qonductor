@@ -5,7 +5,7 @@
 //! ## Quick Start
 //!
 //! ```ignore
-//! use qonductor::{SessionManager, DeviceConfig, SessionEvent, ActivationState, PlaybackResponse};
+//! use qonductor::{SessionManager, DeviceConfig, SessionEvent, Command, Notification, msg};
 //!
 //! #[tokio::main]
 //! async fn main() -> qonductor::Result<()> {
@@ -16,18 +16,22 @@
 //!
 //!     while let Some(event) = session.recv().await {
 //!         match event {
-//!             SessionEvent::PlaybackCommand { renderer_id, cmd, respond } => {
-//!                 println!("Playback command: {:?}", cmd);
-//!                 respond.send(PlaybackResponse { /* ... */ });
-//!             }
-//!             SessionEvent::Activate { renderer_id, respond } => {
-//!                 respond.send(ActivationState { /* ... */ });
-//!             }
-//!             _ => {}
+//!             SessionEvent::Command(cmd) => match cmd {
+//!                 Command::SetState { cmd, respond } => {
+//!                     respond.send(msg::QueueRendererState { /* ... */ });
+//!                 }
+//!                 Command::SetActive { respond, .. } => {
+//!                     respond.send(ActivationState { /* ... */ });
+//!                 }
+//!                 Command::Heartbeat { respond } => {
+//!                     respond.send(None);
+//!                 }
+//!             },
+//!             SessionEvent::Notification(n) => match n {
+//!                 Notification::Connected => println!("Connected!"),
+//!                 _ => {}
+//!             },
 //!         }
-//!
-//!         // Player can also send state updates to the server
-//!         session.report_state(PlaybackResponse { /* ... */ }).await?;
 //!     }
 //!     Ok(())
 //! }
@@ -36,7 +40,10 @@
 pub mod config;
 pub mod credentials;
 pub mod error;
+pub mod event;
 pub mod manager;
+pub mod msg;
+pub mod session;
 pub mod types;
 
 // Internal modules
@@ -46,10 +53,8 @@ pub(crate) mod qconnect;
 
 // Re-export main public API
 pub use manager::SessionManager;
-pub use qconnect::{
-    ActivationState, BroadcastEvent, CommandEvent, DeviceEvent, DeviceSession, PlaybackCommand,
-    PlaybackResponse, QueueTrack, Responder, SessionCommand, SessionEvent, SystemEvent,
-};
+pub use event::{ActivationState, Command, Notification, Responder, SessionEvent};
+pub use session::{DeviceSession, SessionCommand};
 pub use proto::qconnect::{BufferState, DeviceType, LoopMode, PlayingState};
 pub use config::{AudioQuality, DeviceConfig};
 pub use discovery::DeviceTypeExt;
