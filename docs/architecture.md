@@ -14,8 +14,8 @@ Each device gets bidirectional communication via a `DeviceSession` handle:
 │   let mut session = manager.add_device(config).await?;                    │
 │   while let Some(event) = session.recv().await {                          │
 │       match event {                                                       │
-│           SessionEvent::PlaybackCommand { respond, .. } => { ... }        │
-│           SessionEvent::QueueUpdated { .. } => { ... }                    │
+│           SessionEvent::Command(Command::SetState { cmd, respond }) => .. │
+│           SessionEvent::Notification(Notification::QueueState(q)) => ..   │
 │       }                                                                   │
 │       // Player can also initiate state changes                           │
 │       session.report_state(response).await?;                              │
@@ -119,40 +119,42 @@ This design enables:
 
 ## Event Types
 
+Events are delivered via `SessionEvent`, which has two categories:
+- `SessionEvent::Command(Command)` - Must respond via `Responder<T>`
+- `SessionEvent::Notification(Notification)` - Informational (non-exhaustive, use `_ =>`)
+
 ### Commands (require response via Responder)
 
-| Event             | Response Type              | When Sent                       |
-| ----------------- | -------------------------- | ------------------------------- |
-| `PlaybackCommand` | `PlaybackResponse`         | Server commands play/pause/seek |
-| `Activate`        | `ActivationState`          | Device becomes active renderer  |
-| `Heartbeat`       | `Option<PlaybackResponse>` | Every 10 seconds while active   |
+| Command     | Response Type                 | When Sent                       |
+| ----------- | ----------------------------- | ------------------------------- |
+| `SetState`  | `QueueRendererState`          | Server commands play/pause/seek |
+| `SetActive` | `ActivationState`             | Device becomes active renderer  |
+| `Heartbeat` | `Option<QueueRendererState>`  | Every 10 seconds while active   |
 
-### Events (no response needed)
+### Notifications (informational, non-exhaustive)
 
-| Event                | When Sent                                      |
-| -------------------- | ---------------------------------------------- |
-| `Deactivated`        | Device was deactivated by server               |
-| `QueueUpdated`       | Queue changed (tracks added/removed/reordered) |
-| `LoopModeChanged`    | Loop mode changed (off/one/all)                |
-| `ShuffleModeChanged` | Shuffle toggled                                |
-| `RestoreState`       | Receiving state from previous active renderer  |
-
-### Broadcasts (informational)
-
-| Event                       | When Sent                                  |
-| --------------------------- | ------------------------------------------ |
-| `Connected`                 | WebSocket connection established           |
-| `Disconnected`              | WebSocket closed or error                  |
-| `DeviceRegistered`          | Our device registered with server          |
-| `RendererAdded`             | Another device joined session              |
-| `RendererRemoved`           | A device left session                      |
-| `ActiveRendererChanged`     | Active renderer changed                    |
-| `RendererStateUpdated`      | Playback state broadcast from any renderer |
-| `VolumeBroadcast`           | Volume changed                             |
-| `VolumeMutedBroadcast`      | Mute state changed                         |
-| `MaxAudioQualityBroadcast`  | Max quality capability changed             |
-| `FileAudioQualityBroadcast` | Current file's sample rate                 |
-| `SessionClosed`             | Session ended                              |
+| Notification              | When Sent                                      |
+| ------------------------- | ---------------------------------------------- |
+| `Connected`               | WebSocket connection established               |
+| `Disconnected`            | WebSocket closed or error                      |
+| `DeviceRegistered`        | Our device registered with server              |
+| `SessionClosed`           | Session ended                                  |
+| `QueueState`              | Full queue snapshot received                   |
+| `QueueTracksAdded`        | Tracks added to queue                          |
+| `QueueTracksRemoved`      | Tracks removed from queue                      |
+| `QueueTracksReordered`    | Tracks reordered in queue                      |
+| `LoopModeSet`             | Loop mode changed (off/one/all)                |
+| `ShuffleModeSet`          | Shuffle toggled                                |
+| `Deactivated`             | Device was deactivated by server               |
+| `RestoreState`            | Receiving state from previous active renderer  |
+| `AddRenderer`             | Another device joined session                  |
+| `RemoveRenderer`          | A device left session                          |
+| `ActiveRendererChanged`   | Active renderer changed                        |
+| `RendererStateUpdated`    | Playback state broadcast from any renderer     |
+| `VolumeChanged`           | Volume changed                                 |
+| `VolumeMuted`             | Mute state changed                             |
+| `MaxAudioQualityChanged`  | Max quality capability changed                 |
+| `FileAudioQualityChanged` | Current file's sample rate                     |
 
 ## Message Flow Examples
 
@@ -176,13 +178,13 @@ This design enables:
    - Spawns SessionRunner task
 
 6. SessionRunner → User (via event channels)
-   SessionEvent::Connected
+   SessionEvent::Notification(Notification::Connected)
 
 7. Server → SessionRunner (WebSocket)
    SrvrCtrlAddRenderer (our device registered)
 
 8. SessionRunner → User
-   SessionEvent::DeviceRegistered { device_uuid, renderer_id }
+   SessionEvent::Notification(Notification::DeviceRegistered { device_uuid, renderer_id, api_jwt })
 ```
 
 ### Playback Command Flow
@@ -197,17 +199,16 @@ This design enables:
    let (tx, rx) = oneshot::channel()
 
 4. SessionRunner → User (via event_tx)
-   SessionEvent::PlaybackCommand {
-       renderer_id,
-       cmd: PlaybackCommand { state: Playing, position: Some(0), ... },
+   SessionEvent::Command(Command::SetState {
+       cmd: msg::cmd::SetState { playing_state: Some(Playing), ... },
        respond: Responder { tx }
-   }
+   })
 
 5. User handles event, calls respond.send(response)
-   respond.send(PlaybackResponse {
-       state: Playing,
-       position_ms: 0,
-       duration_ms: Some(180000),
+   respond.send(msg::QueueRendererState {
+       playing_state: Some(Playing),
+       current_position: Some(Position::now(0)),
+       duration: Some(180000),
        ...
    })
 
@@ -223,10 +224,10 @@ This design enables:
 1. SessionRunner heartbeat timer fires (every 10 seconds)
 
 2. SessionRunner → User
-   SessionEvent::Heartbeat { renderer_id, respond }
+   SessionEvent::Command(Command::Heartbeat { respond })
 
 3. User returns current state (or None to skip)
-   respond.send(Some(PlaybackResponse { position_ms: 45000, ... }))
+   respond.send(Some(msg::QueueRendererState { current_position: Some(Position::now(45000)), ... }))
 
 4. SessionRunner → Qobuz Server
    RndrSrvrStateUpdated { position: 45000, ... }
@@ -241,9 +242,9 @@ This design enables:
 1. User pauses playback locally (not from Qobuz app)
 
 2. User Application calls session.report_state()
-   session.report_state(PlaybackResponse {
-       state: Paused,
-       position_ms: 45000,
+   session.report_state(msg::QueueRendererState {
+       playing_state: Some(Paused),
+       current_position: Some(Position::now(45000)),
        ...
    }).await?
 
@@ -268,15 +269,15 @@ This design enables:
    SrvrRndrSetActive { active: false }
 
 3. SessionRunner → User
-   SessionEvent::Deactivated { renderer_id }
+   SessionEvent::Notification(Notification::Deactivated)
 
 4. SessionRunner closes WebSocket
 
 5. SessionRunner → User
-   SessionEvent::Disconnected { reason: "Server set inactive" }
+   SessionEvent::Notification(Notification::Disconnected { session_id, reason: Some("Server set inactive") })
 
 6. SessionRunner exits, sends before terminating:
-   SessionEvent::SessionClosed { device_uuid }
+   SessionEvent::Notification(Notification::SessionClosed { device_uuid })
 
 7. SessionManager forwards SessionClosed to user
 ```

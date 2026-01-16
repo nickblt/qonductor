@@ -145,34 +145,60 @@ Events from Qobuz server flow to user code:
 ## Usage
 
 ```rust
-use qonductor::{SessionManager, DeviceConfig, SessionEvent};
+use qonductor::{
+    SessionManager, DeviceConfig, SessionEvent, Command, Notification,
+    ActivationState, msg, PlayingState, BufferState,
+    msg::{PositionExt, QueueRendererStateExt},
+};
 
 #[tokio::main]
 async fn main() -> qonductor::Result<()> {
     // Start the session manager (HTTP server + mDNS)
-    let (mut manager, mut events) = SessionManager::start(7864).await?;
+    let mut manager = SessionManager::start(7864).await?;
 
-    // Register devices for discovery
-    manager.add_device(DeviceConfig::new("Living Room Speaker", "your_app_id")).await?;
-    manager.add_device(DeviceConfig::new("Kitchen Speaker", "your_app_id")).await?;
+    // Register device and get session handle for bidirectional communication
+    let mut session = manager.add_device(
+        DeviceConfig::new("Living Room Speaker", "your_app_id")
+    ).await?;
 
     // Spawn manager to handle device selections
     tokio::spawn(async move { manager.run().await });
 
-    // Handle events
-    while let Some(event) = events.recv().await {
+    // Handle events for this device
+    while let Some(event) = session.recv().await {
         match event {
-            SessionEvent::Connected => println!("Connected!"),
-            SessionEvent::DeviceRegistered { renderer_id, .. } => {
-                println!("Registered as renderer {}", renderer_id);
-            }
-            SessionEvent::PlaybackCommand { state, position_ms, .. } => {
-                println!("Play {:?} at {:?}ms", state, position_ms);
-            }
-            SessionEvent::QueueUpdated { tracks, .. } => {
-                println!("Queue has {} tracks", tracks.len());
-            }
-            _ => {}
+            // Commands require a response via the Responder
+            SessionEvent::Command(cmd) => match cmd {
+                Command::SetState { cmd, respond } => {
+                    println!("Play {:?} at {:?}ms", cmd.playing_state, cmd.current_position);
+                    let mut response = msg::QueueRendererState::default();
+                    response.set_state(PlayingState::Playing).set_buffer(BufferState::Ok);
+                    respond.send(response);
+                }
+                Command::SetActive { respond, .. } => {
+                    println!("Device activated!");
+                    respond.send(ActivationState {
+                        muted: false,
+                        volume: 100,
+                        max_quality: 4,
+                        playback: msg::QueueRendererState::default(),
+                    });
+                }
+                Command::Heartbeat { respond } => {
+                    respond.send(None); // or Some(state) if playing
+                }
+            },
+            // Notifications are informational (use _ => for forward compatibility)
+            SessionEvent::Notification(n) => match n {
+                Notification::Connected => println!("Connected!"),
+                Notification::DeviceRegistered { renderer_id, .. } => {
+                    println!("Registered as renderer {}", renderer_id);
+                }
+                Notification::QueueState(queue) => {
+                    println!("Queue has {} tracks", queue.tracks.len());
+                }
+                _ => {}
+            },
         }
     }
 
@@ -186,7 +212,11 @@ async fn main() -> qonductor::Result<()> {
 | ---------------- | ---------------------------------------------------------- |
 | `SessionManager` | Main entry point. Manages devices and sessions.            |
 | `DeviceConfig`   | Configuration for a discoverable device.                   |
-| `SessionEvent`   | Events from Qobuz (playback commands, queue updates, etc.) |
+| `DeviceSession`  | Bidirectional session handle returned by `add_device()`.   |
+| `SessionEvent`   | Wrapper: `Command(Command)` or `Notification(Notification)` |
+| `Command`        | Events requiring response: `SetState`, `SetActive`, `Heartbeat` |
+| `Notification`   | Informational events: `Connected`, `QueueState`, etc.      |
+| `Responder<T>`   | Used to send required responses back to the server.        |
 | `PlayingState`   | Playback state: `Playing`, `Paused`, `Stopped`             |
 
 ## How It Works
