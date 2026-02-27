@@ -68,10 +68,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Generated protobuf types.
 pub mod proto {
+    #[allow(clippy::all)]
     pub mod qconnect {
-        include!(concat!(env!("OUT_DIR"), "/qconnect.rs"));
+        include!("proto/qconnect.rs");
     }
+    #[allow(clippy::all)]
     pub mod ws {
-        include!(concat!(env!("OUT_DIR"), "/ws.rs"));
+        include!("proto/ws.rs");
     }
 }
