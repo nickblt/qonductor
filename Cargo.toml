@@ -57,5 +57,8 @@ toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wiremock = "0.6"
 
+[features]
+compile-protos = ["dep:prost-build"]
+
 [build-dependencies]
-prost-build = "0.13"
+prost-build = { version = "0.13", optional = true }
