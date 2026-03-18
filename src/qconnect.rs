@@ -456,7 +456,7 @@ impl SessionRunner {
             t if t == QConnectMessageType::MessageTypeSrvrRndrSetState as i32 => {
                 if let Some(ss) = msg.srvr_rndr_set_state {
                     // Only respond if there's an actual state change request
-                    if ss.playing_state.is_some() || ss.current_position.is_some() {
+                    if ss.playing_state.is_some() || ss.current_position.is_some() || ss.current_queue_item.is_some() {
                         let (tx, rx) = oneshot::channel();
                         let _ = self
                             .event_tx
