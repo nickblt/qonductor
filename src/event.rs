@@ -7,6 +7,7 @@
 
 use tokio::sync::oneshot;
 
+use crate::msg::report::VolumeChanged;
 use crate::msg::{self, QueueRendererState};
 use crate::proto::qconnect::{QConnectMessage, QConnectMessageType};
 
@@ -131,6 +132,11 @@ pub enum Command {
     SetState {
         cmd: msg::cmd::SetState,
         respond: Responder<QueueRendererState>,
+    },
+
+    SetVolume {
+        cmd: msg::cmd::SetVolume,
+        respond: Responder<VolumeChanged>,
     },
 
     /// Device activation. Must respond with [`ActivationState`].

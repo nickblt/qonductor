@@ -8,7 +8,7 @@
 use qonductor::{
     msg, ActivationState, BufferState, Command, DeviceConfig, LoopMode, Notification, PlayingState,
     SessionEvent, SessionManager,
-    msg::{PositionExt, QueueRendererStateExt, SetStateExt, LoopModeSetExt},
+    msg::{PositionExt, QueueRendererStateExt, SetStateExt, LoopModeSetExt, report::VolumeChanged},
 };
 use rand::{thread_rng, Rng};
 use serde::Deserialize;
@@ -264,6 +264,13 @@ impl FakePlayer {
         self.renderer_state()
     }
 
+    fn handle_set_volume(&mut self, volume: u32) -> VolumeChanged {
+        self.volume = volume;
+        VolumeChanged {
+            volume: Some(volume)
+        }
+    }
+
     fn handle_activate(&mut self) -> ActivationState {
         info!(renderer_id = self.renderer_id, "Device activated");
 
@@ -382,6 +389,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         Command::SetActive { respond, .. } => {
                             let response = player.handle_activate();
+                            respond.send(response);
+                        }
+
+                        Command::SetVolume { cmd, respond } => {
+                            let response = player.handle_set_volume(cmd.volume.unwrap_or(100));
                             respond.send(response);
                         }
 
