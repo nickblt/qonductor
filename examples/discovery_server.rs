@@ -13,7 +13,7 @@
 use qonductor::{
     msg, ActivationState, BufferState, Command, DeviceConfig, DeviceSession, Notification,
     PlayingState, SessionEvent, SessionManager,
-    msg::{PositionExt, QueueRendererStateExt, SetStateExt, LoopModeSetExt},
+    msg::{PositionExt, QueueRendererStateExt, SetStateExt, LoopModeSetExt, report::VolumeChanged},
 };
 use serde::Deserialize;
 use std::fs;
@@ -66,6 +66,13 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
                         volume: 100,
                         max_quality: 4,
                         playback,
+                    });
+                }
+
+                Command::SetVolume { cmd, respond } => {
+                    println!("[{}] Volume changed: {:?}", device_name, cmd.volume);
+                    respond.send(VolumeChanged {
+                        volume: cmd.volume
                     });
                 }
 

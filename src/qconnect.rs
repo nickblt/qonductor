@@ -474,6 +474,25 @@ impl SessionRunner {
                 }
             }
 
+            // SrvrRndrSetVolume (42) - Set volume
+            t if t == QConnectMessageType::MessageTypeSrvrRndrSetVolume as i32 => {
+                if let Some(ss) = msg.srvr_rndr_set_volume {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::Command(Command::SetVolume {
+                            cmd: ss,
+                            respond: Responder::new(tx),
+                        }))
+                        .await;
+                    if let Ok(response) = rx.await
+                        && let Err(e) = self.do_report_volume(response.volume()).await
+                    {
+                        warn!(error = %e, "Failed to send playback response");
+                    }
+                }
+            }
+
             // SrvrRndrSetActive (43) - Server activates/deactivates us
             t if t == QConnectMessageType::MessageTypeSrvrRndrSetActive as i32 => {
                 if let Some(sa) = msg.srvr_rndr_set_active {
