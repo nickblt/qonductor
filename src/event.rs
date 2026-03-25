@@ -93,6 +93,9 @@ impl<T> Responder<T> {
 ///             Command::SetState { cmd, respond, .. } => {
 ///                 respond.send(handle_playback(&cmd));
 ///             }
+///             Command::SetVolume { cmd, respond } => {
+///                 respond.send(handle_volume(&cmd));
+///             }
 ///             Command::SetActive { respond, .. } => {
 ///                 respond.send(activation_state());
 ///             }
@@ -134,6 +137,7 @@ pub enum Command {
         respond: Responder<QueueRendererState>,
     },
 
+    /// Server commands volume change. Must respond with [`VolumeChanged`].
     SetVolume {
         cmd: msg::cmd::SetVolume,
         respond: Responder<VolumeChanged>,

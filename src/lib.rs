@@ -20,6 +20,9 @@
 //!                 Command::SetState { cmd, respond } => {
 //!                     respond.send(msg::QueueRendererState { /* ... */ });
 //!                 }
+//!                 Command::SetVolume { cmd, respond } => {
+//!                     respond.send(msg::report::VolumeChanged { volume: cmd.volume });
+//!                 }
 //!                 Command::SetActive { respond, .. } => {
 //!                     respond.send(ActivationState { /* ... */ });
 //!                 }

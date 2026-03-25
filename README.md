@@ -148,7 +148,7 @@ Events from Qobuz server flow to user code:
 use qonductor::{
     SessionManager, DeviceConfig, SessionEvent, Command, Notification,
     ActivationState, msg, PlayingState, BufferState,
-    msg::{PositionExt, QueueRendererStateExt},
+    msg::{PositionExt, QueueRendererStateExt, SetStateExt, report::VolumeChanged},
 };
 
 #[tokio::main]
@@ -170,10 +170,19 @@ async fn main() -> qonductor::Result<()> {
             // Commands require a response via the Responder
             SessionEvent::Command(cmd) => match cmd {
                 Command::SetState { cmd, respond } => {
-                    println!("Play {:?} at {:?}ms", cmd.playing_state, cmd.current_position);
-                    let mut response = msg::QueueRendererState::default();
-                    response.set_state(PlayingState::Playing).set_buffer(BufferState::Ok);
+                    println!("Play {:?} at {:?}ms", cmd.state(), cmd.current_position);
+                    let mut response = msg::QueueRendererState {
+                        current_position: Some(msg::Position::now(cmd.current_position.unwrap_or(0))),
+                        ..Default::default()
+                    };
+                    response
+                        .set_state(cmd.state().unwrap_or(PlayingState::Stopped))
+                        .set_buffer(BufferState::Ok);
                     respond.send(response);
+                }
+                Command::SetVolume { cmd, respond } => {
+                    println!("Volume: {:?}", cmd.volume);
+                    respond.send(VolumeChanged { volume: cmd.volume });
                 }
                 Command::SetActive { respond, .. } => {
                     println!("Device activated!");
@@ -214,7 +223,7 @@ async fn main() -> qonductor::Result<()> {
 | `DeviceConfig`   | Configuration for a discoverable device.                   |
 | `DeviceSession`  | Bidirectional session handle returned by `add_device()`.   |
 | `SessionEvent`   | Wrapper: `Command(Command)` or `Notification(Notification)` |
-| `Command`        | Events requiring response: `SetState`, `SetActive`, `Heartbeat` |
+| `Command`        | Events requiring response: `SetState`, `SetVolume`, `SetActive`, `Heartbeat` |
 | `Notification`   | Informational events: `Connected`, `QueueState`, etc.      |
 | `Responder<T>`   | Used to send required responses back to the server.        |
 | `PlayingState`   | Playback state: `Playing`, `Paused`, `Stopped`             |
