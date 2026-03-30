@@ -112,8 +112,8 @@ pub struct QueueItemRef {
 /// Track with context (snapshots/autoplay)
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct QueueTrackRef {
-    #[prost(uint64, optional, tag = "1")]
-    pub queue_item_id: ::core::option::Option<u64>,
+    #[prost(uint64, required, tag = "1")]
+    pub queue_item_id: u64,
     #[prost(fixed32, optional, tag = "2")]
     pub track_id: ::core::option::Option<u32>,
     /// 16 bytes

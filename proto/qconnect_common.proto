@@ -108,7 +108,7 @@ message QueueItemRef {
 
 // Track with context (snapshots/autoplay)
 message QueueTrackRef {
-  optional uint64 queue_item_id = 1;
+  required uint64 queue_item_id = 1;
   optional fixed32 track_id = 2;
   optional bytes context_uuid = 3;  // 16 bytes
 }
