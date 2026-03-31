@@ -3,31 +3,21 @@
 //! This example starts an mDNS service and HTTP endpoints that allow
 //! Qobuz controllers to discover and connect to multiple devices.
 //!
-//! Setup:
-//!   1. Copy credentials.toml.example to credentials.toml
-//!   2. Fill in your app_id and app_secret
-//!
-//! Run with: cargo run --example discovery_server
-//! Run with debug: RUST_LOG=qonductor=debug cargo run --example discovery_server
+//! Run with: QOBUZ_APP_ID=000000000 cargo run --example discovery_server
+//! Run with debug: RUST_LOG=qonductor=debug QOBUZ_APP_ID=000000000 cargo run --example discovery_server
 
 use qonductor::{
-    msg, ActivationState, BufferState, Command, DeviceConfig, DeviceSession, Notification,
-    PlayingState, SessionEvent, SessionManager,
-    msg::{PositionExt, QueueRendererStateExt, SetStateExt, LoopModeSetExt, report::VolumeChanged},
+    ActivationState, BufferState, Command, DeviceConfig, DeviceSession, Notification, PlayingState,
+    SessionEvent, SessionManager, msg,
+    msg::{LoopModeSetExt, PositionExt, QueueRendererStateExt, SetStateExt, report::VolumeChanged},
 };
-use serde::Deserialize;
-use std::fs;
+use std::env;
+
+const PORT: u16 = 7864;
 use tokio::signal;
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
-
-#[derive(Deserialize)]
-struct Credentials {
-    app_id: String,
-    #[allow(dead_code)]
-    app_secret: String,
-}
 
 /// Handle events for a single device.
 async fn handle_device_events(device_name: String, mut session: DeviceSession) {
@@ -41,7 +31,10 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
 
                     println!(
                         "[{}] Playback command: state={:?} position={:?} queue_item={:?}",
-                        device_name, cmd.state(), position_ms, queue_item_id
+                        device_name,
+                        cmd.state(),
+                        position_ms,
+                        queue_item_id
                     );
 
                     let mut response = msg::QueueRendererState {
@@ -60,7 +53,9 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
                         current_position: Some(msg::Position::now(0)),
                         ..Default::default()
                     };
-                    playback.set_state(PlayingState::Stopped).set_buffer(BufferState::Ok);
+                    playback
+                        .set_state(PlayingState::Stopped)
+                        .set_buffer(BufferState::Ok);
                     respond.send(ActivationState {
                         muted: false,
                         volume: 100,
@@ -71,9 +66,7 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
 
                 Command::SetVolume { cmd, respond } => {
                     println!("[{}] Volume changed: {:?}", device_name, cmd.volume);
-                    respond.send(VolumeChanged {
-                        volume: cmd.volume
-                    });
+                    respond.send(VolumeChanged { volume: cmd.volume });
                 }
 
                 Command::Heartbeat { respond, .. } => {
@@ -153,10 +146,7 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
                         .and_then(|s| s.current_position.as_ref())
                         .and_then(|p| p.value)
                         .unwrap_or(0);
-                    let queue_index = rsu
-                        .state
-                        .as_ref()
-                        .and_then(|s| s.current_queue_index);
+                    let queue_index = rsu.state.as_ref().and_then(|s| s.current_queue_index);
                     println!(
                         "[{}] Restore state: position={}ms queue_idx={:?}",
                         device_name, position_ms, queue_index
@@ -211,38 +201,25 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    println!("Loading credentials from credentials.toml...");
-
-    let contents = match fs::read_to_string("credentials.toml") {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to read credentials.toml: {e}");
-            eprintln!(
-                "Hint: Copy credentials.toml.example to credentials.toml and fill in your credentials"
-            );
+    let app_id = match env::var("QOBUZ_APP_ID") {
+        Ok(id) => id,
+        Err(_) => {
+            eprintln!("QOBUZ_APP_ID environment variable is not set");
             std::process::exit(1);
         }
     };
 
-    let creds: Credentials = match toml::from_str(&contents) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to parse credentials.toml: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    println!("Starting discovery server...");
+    println!("Starting discovery server on port {PORT}...");
 
     // Start the session manager
-    let mut manager = SessionManager::start(7864).await.unwrap();
+    let mut manager = SessionManager::start(PORT).await.unwrap();
 
     // Register multiple devices, each with its own event handler
-    let devices = vec!["Living Room Speaker", "Kitchen Speaker", "Bedroom Speaker"];
+    let devices = vec!["Discovery Example 1", "Discovery Example 2"];
 
     let mut device_handles = Vec::new();
     for name in &devices {
-        let config = DeviceConfig::new(*name, &creds.app_id);
+        let config = DeviceConfig::new(*name, &app_id);
         let session = manager.add_device(config).await.unwrap();
         println!("Registered device: {}", name);
 

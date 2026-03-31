@@ -2,8 +2,8 @@
 //!
 //! Simulates a Qobuz Connect player using the stream-based event API.
 //!
-//! Run with: RUST_LOG=info cargo run --example fake_player
-//! Run with debug: RUST_LOG=qonductor=debug,fake_player=debug cargo run --example fake_player
+//! Run with: QOBUZ_APP_ID=000000000 RUST_LOG=info cargo run --example fake_player
+//! Run with debug: QOBUZ_APP_ID=000000000 RUST_LOG=qonductor=debug,fake_player=debug cargo run --example fake_player
 
 use qonductor::{
     msg, ActivationState, BufferState, Command, DeviceConfig, LoopMode, Notification, PlayingState,
@@ -11,27 +11,11 @@ use qonductor::{
     msg::{PositionExt, QueueRendererStateExt, SetStateExt, LoopModeSetExt, report::VolumeChanged},
 };
 use rand::{thread_rng, Rng};
-use serde::Deserialize;
 use std::collections::HashMap;
-use std::fs;
+use std::env;
 use std::time::Instant;
 use tokio::signal;
 use tracing::{debug, info, warn};
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-#[derive(Deserialize)]
-struct Config {
-    app_id: String,
-}
-
-fn load_config() -> Config {
-    let config_str =
-        fs::read_to_string("credentials.toml").expect("Failed to read credentials.toml");
-    toml::from_str(&config_str).expect("Failed to parse credentials.toml")
-}
 
 // ============================================================================
 // Track Duration Provider
@@ -347,7 +331,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let config = load_config();
+    let app_id = match env::var("QOBUZ_APP_ID") {
+        Ok(id) => id,
+        Err(_) => {
+            eprintln!("QOBUZ_APP_ID environment variable is not set");
+            std::process::exit(1);
+        }
+    };
 
     // Create the player
     let mut player = FakePlayer::new();
@@ -356,7 +346,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut manager = SessionManager::start(7864).await?;
 
     // Register device and get its session handle
-    let device_config = DeviceConfig::new("Fake Player", &config.app_id);
+    let device_config = DeviceConfig::new("Fake Player", &app_id);
     let mut session = manager.add_device(device_config).await?;
     info!("Registered device: Fake Player");
 
