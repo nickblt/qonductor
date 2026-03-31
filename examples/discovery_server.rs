@@ -37,7 +37,7 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
             SessionEvent::Command(cmd) => match cmd {
                 Command::SetState { cmd, respond } => {
                     let position_ms = cmd.current_position;
-                    let queue_item_id = cmd.current_queue_item.as_ref().and_then(|q| q.queue_item_id);
+                    let queue_item_id = cmd.current_queue_item.as_ref().map(|q| q.queue_item_id);
 
                     println!(
                         "[{}] Playback command: state={:?} position={:?} queue_item={:?}",

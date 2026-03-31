@@ -130,9 +130,7 @@ impl FakePlayer {
     }
 
     fn current_queue_item_id(&self) -> Option<i32> {
-        self.current_track()
-            .and_then(|t| t.queue_item_id)
-            .map(|id| id as i32)
+        self.current_track().map(|t| t.queue_item_id as i32)
     }
 
     fn current_duration(&mut self) -> Option<u32> {
@@ -143,10 +141,7 @@ impl FakePlayer {
     fn next_queue_item_id(&self) -> Option<i32> {
         let current_idx = self.current_track_index?;
         let next_idx = current_idx + 1;
-        self.queue
-            .get(next_idx)
-            .and_then(|t| t.queue_item_id)
-            .map(|id| id as i32)
+        self.queue.get(next_idx).map(|t| t.queue_item_id as i32)
     }
 
     fn renderer_state(&mut self) -> msg::QueueRendererState {
@@ -218,7 +213,7 @@ impl FakePlayer {
         let target = queue_item_id as u64;
         self.queue
             .iter()
-            .position(|t| t.queue_item_id == Some(target))
+            .position(|t| t.queue_item_id == target)
     }
 
     // === Event handlers ===
@@ -226,7 +221,7 @@ impl FakePlayer {
     fn handle_playback_command(&mut self, cmd: &msg::cmd::SetState) -> msg::QueueRendererState {
         let new_state = cmd.state().unwrap_or(self.state); // None means keep current
         let position_ms = cmd.current_position;
-        let queue_item_id = cmd.current_queue_item.as_ref().and_then(|q| q.queue_item_id);
+        let queue_item_id = cmd.current_queue_item.as_ref().map(|q| q.queue_item_id);
 
         info!(state = ?cmd.state(), ?position_ms, ?queue_item_id, "Playback command received");
 
