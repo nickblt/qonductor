@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::event::SessionEvent;
+use crate::msg;
 use crate::msg::QueueRendererState;
 
 // ============================================================================
@@ -30,6 +31,12 @@ pub enum SessionCommand {
     ReportMaxAudioQuality(i32),
     /// Report current file's sample rate in Hz.
     ReportFileAudioQuality(u32),
+    QueueLoadTracks(msg::ctrl::QueueLoadTracks),
+    QueueAddTracks(msg::ctrl::QueueAddTracks),
+    QueueInsertTracks(msg::ctrl::QueueInsertTracks),
+    QueueRemoveTracks(msg::ctrl::QueueRemoveTracks),
+    QueueReorderTracks(msg::ctrl::QueueReorderTracks),
+    ClearQueue(msg::ctrl::ClearQueue),
 }
 
 // ============================================================================
@@ -138,5 +145,49 @@ impl DeviceSession {
     pub async fn report_file_audio_quality(&self, sample_rate_hz: u32) -> crate::Result<()> {
         self.send_command(SessionCommand::ReportFileAudioQuality(sample_rate_hz))
             .await
+    }
+
+    /// Load tracks into the queue (replaces current queue).
+    pub async fn queue_load_tracks(&self, cmd: msg::ctrl::QueueLoadTracks) -> crate::Result<()> {
+        self.send_command(SessionCommand::QueueLoadTracks(cmd))
+            .await
+    }
+
+    /// Add tracks to the end of the queue.
+    pub async fn queue_add_tracks(&self, cmd: msg::ctrl::QueueAddTracks) -> crate::Result<()> {
+        self.send_command(SessionCommand::QueueAddTracks(cmd))
+            .await
+    }
+
+    /// Insert tracks after a specific position.
+    pub async fn queue_insert_tracks(
+        &self,
+        cmd: msg::ctrl::QueueInsertTracks,
+    ) -> crate::Result<()> {
+        self.send_command(SessionCommand::QueueInsertTracks(cmd))
+            .await
+    }
+
+    /// Remove tracks by queue item ID.
+    pub async fn queue_remove_tracks(
+        &self,
+        cmd: msg::ctrl::QueueRemoveTracks,
+    ) -> crate::Result<()> {
+        self.send_command(SessionCommand::QueueRemoveTracks(cmd))
+            .await
+    }
+
+    /// Reorder tracks within the queue.
+    pub async fn queue_reorder_tracks(
+        &self,
+        cmd: msg::ctrl::QueueReorderTracks,
+    ) -> crate::Result<()> {
+        self.send_command(SessionCommand::QueueReorderTracks(cmd))
+            .await
+    }
+
+    /// Clear the entire queue.
+    pub async fn clear_queue(&self, cmd: msg::ctrl::ClearQueue) -> crate::Result<()> {
+        self.send_command(SessionCommand::ClearQueue(cmd)).await
     }
 }

@@ -19,7 +19,9 @@ use crate::event::{
     dispatch_notification, ActivationState, Command, Notification, Responder, SessionEvent,
 };
 use crate::msg::{
-    ctrl::{AskForQueueState, AskForRendererState, SetActiveRenderer},
+    ctrl::{
+        self, AskForQueueState, AskForRendererState, SetActiveRenderer,
+    },
     report::{
         FileAudioQualityChanged, MaxAudioQualityChanged, StateUpdated, VolumeChanged, VolumeMuted,
     },
@@ -216,6 +218,12 @@ impl SessionRunner {
             SessionCommand::ReportFileAudioQuality(sample_rate_hz) => {
                 self.do_report_file_audio_quality(sample_rate_hz).await
             }
+            SessionCommand::QueueLoadTracks(cmd) => self.do_queue_load_tracks(cmd).await,
+            SessionCommand::QueueAddTracks(cmd) => self.do_queue_add_tracks(cmd).await,
+            SessionCommand::QueueInsertTracks(cmd) => self.do_queue_insert_tracks(cmd).await,
+            SessionCommand::QueueRemoveTracks(cmd) => self.do_queue_remove_tracks(cmd).await,
+            SessionCommand::QueueReorderTracks(cmd) => self.do_queue_reorder_tracks(cmd).await,
+            SessionCommand::ClearQueue(cmd) => self.do_clear_queue(cmd).await,
         }
     }
 
@@ -295,6 +303,60 @@ impl SessionRunner {
             ctrl_srvr_ask_for_renderer_state: Some(AskForRendererState {
                 session_id: Some(session_id),
             }),
+            ..Default::default()
+        };
+        self.writer.send(msg).await
+    }
+
+    async fn do_queue_load_tracks(&mut self, cmd: ctrl::QueueLoadTracks) -> Result<()> {
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeCtrlSrvrQueueLoadTracks as i32),
+            ctrl_srvr_queue_load_tracks: Some(cmd),
+            ..Default::default()
+        };
+        self.writer.send(msg).await
+    }
+
+    async fn do_queue_add_tracks(&mut self, cmd: ctrl::QueueAddTracks) -> Result<()> {
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeCtrlSrvrQueueAddTracks as i32),
+            ctrl_srvr_queue_add_tracks: Some(cmd),
+            ..Default::default()
+        };
+        self.writer.send(msg).await
+    }
+
+    async fn do_queue_insert_tracks(&mut self, cmd: ctrl::QueueInsertTracks) -> Result<()> {
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeCtrlSrvrQueueInsertTracks as i32),
+            ctrl_srvr_queue_insert_tracks: Some(cmd),
+            ..Default::default()
+        };
+        self.writer.send(msg).await
+    }
+
+    async fn do_queue_remove_tracks(&mut self, cmd: ctrl::QueueRemoveTracks) -> Result<()> {
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeCtrlSrvrQueueRemoveTracks as i32),
+            ctrl_srvr_queue_remove_tracks: Some(cmd),
+            ..Default::default()
+        };
+        self.writer.send(msg).await
+    }
+
+    async fn do_queue_reorder_tracks(&mut self, cmd: ctrl::QueueReorderTracks) -> Result<()> {
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeCtrlSrvrQueueReorderTracks as i32),
+            ctrl_srvr_queue_reorder_tracks: Some(cmd),
+            ..Default::default()
+        };
+        self.writer.send(msg).await
+    }
+
+    async fn do_clear_queue(&mut self, cmd: ctrl::ClearQueue) -> Result<()> {
+        let msg = QConnectMessage {
+            message_type: Some(QConnectMessageType::MessageTypeCtrlSrvrClearQueue as i32),
+            ctrl_srvr_clear_queue: Some(cmd),
             ..Default::default()
         };
         self.writer.send(msg).await
