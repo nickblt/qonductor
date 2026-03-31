@@ -23,8 +23,8 @@ use crate::{Error, Result};
 /// # Example
 ///
 /// ```ignore
-/// let mut manager = SessionManager::start(7864).await?;
-/// let mut session = manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
+/// let mut manager = SessionManager::start(7864, "your_app_id").await?;
+/// let mut session = manager.add_device(DeviceConfig::new("Living Room")).await?;
 ///
 /// // Spawn manager to handle device selections
 /// tokio::spawn(async move { manager.run().await });
@@ -60,11 +60,11 @@ impl SessionManager {
     /// # Example
     ///
     /// ```ignore
-    /// let mut manager = SessionManager::start(7864).await?;
+    /// let mut manager = SessionManager::start(7864, "your_app_id").await?;
     /// let events = manager.add_device(device_config).await?;
     /// ```
-    pub async fn start(port: u16) -> Result<Self> {
-        let (registry, device_rx) = DeviceRegistry::start(port).await?;
+    pub async fn start(port: u16, app_id: impl Into<String>) -> Result<Self> {
+        let (registry, device_rx) = DeviceRegistry::start(port, app_id.into()).await?;
 
         Ok(Self {
             registry,
@@ -82,7 +82,7 @@ impl SessionManager {
     /// # Example
     ///
     /// ```ignore
-    /// let mut session = manager.add_device(DeviceConfig::new("Living Room", &app_id)).await?;
+    /// let mut session = manager.add_device(DeviceConfig::new("Living Room")).await?;
     ///
     /// while let Some(event) = session.recv().await {
     ///     // Handle events for this device

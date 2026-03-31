@@ -143,6 +143,7 @@ struct RegisteredDevice {
 struct AppState {
     devices: RwLock<HashMap<[u8; 16], RegisteredDevice>>,
     event_tx: mpsc::Sender<DeviceSelected>,
+    app_id: String,
 }
 
 // ============================================================================
@@ -189,7 +190,7 @@ async fn get_connect_info(
 
     Ok(Json(ConnectInfoResponse {
         current_session_id: device.current_session_id.clone().unwrap_or_default(),
-        app_id: device.config.app_id.clone(),
+        app_id: state.app_id.clone(),
     }))
 }
 
@@ -277,12 +278,13 @@ impl DeviceRegistry {
     /// Start the device registry with HTTP server on the given port.
     ///
     /// Returns the registry and a receiver for device selection events.
-    pub async fn start(port: u16) -> Result<(Self, mpsc::Receiver<DeviceSelected>)> {
+    pub async fn start(port: u16, app_id: String) -> Result<(Self, mpsc::Receiver<DeviceSelected>)> {
         let (event_tx, event_rx) = mpsc::channel(16);
 
         let state = Arc::new(AppState {
             devices: RwLock::new(HashMap::new()),
             event_tx,
+            app_id,
         });
 
         // Bind HTTP server

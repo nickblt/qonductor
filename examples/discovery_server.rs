@@ -212,14 +212,14 @@ async fn main() {
     println!("Starting discovery server on port {PORT}...");
 
     // Start the session manager
-    let mut manager = SessionManager::start(PORT).await.unwrap();
+    let mut manager = SessionManager::start(PORT, &app_id).await.unwrap();
 
     // Register multiple devices, each with its own event handler
     let devices = vec!["Discovery Example 1", "Discovery Example 2"];
 
     let mut device_handles = Vec::new();
     for name in &devices {
-        let config = DeviceConfig::new(*name, &app_id);
+        let config = DeviceConfig::new(*name);
         let session = manager.add_device(config).await.unwrap();
         println!("Registered device: {}", name);
 

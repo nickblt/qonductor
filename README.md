@@ -154,11 +154,11 @@ use qonductor::{
 #[tokio::main]
 async fn main() -> qonductor::Result<()> {
     // Start the session manager (HTTP server + mDNS)
-    let mut manager = SessionManager::start(7864).await?;
+    let mut manager = SessionManager::start(7864, "your_app_id").await?;
 
     // Register device and get session handle for bidirectional communication
     let mut session = manager.add_device(
-        DeviceConfig::new("Living Room Speaker", "your_app_id")
+        DeviceConfig::new("Living Room Speaker")
     ).await?;
 
     // Spawn manager to handle device selections

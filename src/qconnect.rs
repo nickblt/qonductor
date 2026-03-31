@@ -74,6 +74,7 @@ pub(crate) async fn spawn_session(
         writer,
         device_uuid: device_config.device_uuid,
         device_name: device_config.friendly_name.clone(),
+        auto_activate: device_config.auto_activate,
         renderer_id: 0,
         is_active: false,
         event_tx,
@@ -117,6 +118,7 @@ struct SessionRunner {
     writer: ConnectionWriter,
     device_uuid: [u8; 16],
     device_name: String,
+    auto_activate: bool,
     renderer_id: u64,
     is_active: bool,
     event_tx: mpsc::Sender<SessionEvent>,
@@ -425,17 +427,20 @@ impl SessionRunner {
                             }))
                             .await;
 
-                        // Declare as active renderer
-                        let set_active_msg = QConnectMessage {
-                            message_type: Some(
-                                QConnectMessageType::MessageTypeCtrlSrvrSetActiveRenderer as i32,
-                            ),
-                            ctrl_srvr_set_active_renderer: Some(SetActiveRenderer {
-                                renderer_id: Some(rid as i32),
-                            }),
-                            ..Default::default()
-                        };
-                        self.writer.send(set_active_msg).await?;
+                        // Declare as active renderer (unless auto_activate is off)
+                        if self.auto_activate {
+                            let set_active_msg = QConnectMessage {
+                                message_type: Some(
+                                    QConnectMessageType::MessageTypeCtrlSrvrSetActiveRenderer
+                                        as i32,
+                                ),
+                                ctrl_srvr_set_active_renderer: Some(SetActiveRenderer {
+                                    renderer_id: Some(rid as i32),
+                                }),
+                                ..Default::default()
+                            };
+                            self.writer.send(set_active_msg).await?;
+                        }
                     }
                 }
                 // Also emit the notification for downstream consumers
@@ -591,16 +596,21 @@ impl SessionRunner {
                             .send(SessionEvent::Notification(Notification::Deactivated))
                             .await;
 
-                        // Close WebSocket and signal run loop to exit
-                        let _ = self.writer.close().await;
-                        let _ = self
-                            .event_tx
-                            .send(SessionEvent::Notification(Notification::Disconnected {
-                                session_id: self.session_id.clone(),
-                                reason: Some("Server set inactive".to_string()),
-                            }))
-                            .await;
-                        return Ok(true);
+                        if self.auto_activate {
+                            // Discovery path: close WebSocket and exit since the
+                            // session was created on-demand for this activation.
+                            let _ = self.writer.close().await;
+                            let _ = self
+                                .event_tx
+                                .send(SessionEvent::Notification(Notification::Disconnected {
+                                    session_id: self.session_id.clone(),
+                                    reason: Some("Server set inactive".to_string()),
+                                }))
+                                .await;
+                            return Ok(true);
+                        }
+                        // Direct connect path: stay connected so the device can
+                        // be re-selected in the Qobuz app.
                     }
                 }
             }

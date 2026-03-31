@@ -34,8 +34,13 @@ pub struct DeviceConfig {
     pub model: String,
     /// Maximum audio quality capability level.
     pub max_audio_quality: AudioQuality,
-    /// Qobuz app_id (required for get-connect-info).
-    pub app_id: String,
+    /// Whether to automatically declare as active renderer on registration.
+    ///
+    /// When `true` (the default), the device sends `SetActiveRenderer` as soon as
+    /// the server confirms registration, taking over playback immediately. Set to
+    /// `false` to just register and wait for the user to select this device in the
+    /// Qobuz app.
+    pub auto_activate: bool,
 }
 
 impl DeviceConfig {
@@ -43,7 +48,7 @@ impl DeviceConfig {
     ///
     /// This ensures the same device name always gets the same UUID, so the server
     /// recognizes it as the same device across restarts.
-    pub fn new(friendly_name: impl Into<String>, app_id: impl Into<String>) -> Self {
+    pub fn new(friendly_name: impl Into<String>) -> Self {
         let name = friendly_name.into();
         // Generate deterministic UUID from device name using MD5
         let mut hasher = Md5::new();
@@ -57,16 +62,12 @@ impl DeviceConfig {
             brand: "Qonductor".to_string(),
             model: "Qonductor Rust".to_string(),
             max_audio_quality: AudioQuality::HiRes192,
-            app_id: app_id.into(),
+            auto_activate: true,
         }
     }
 
     /// Create a new device configuration with a specific UUID.
-    pub fn with_uuid(
-        device_uuid: [u8; 16],
-        friendly_name: impl Into<String>,
-        app_id: impl Into<String>,
-    ) -> Self {
+    pub fn with_uuid(device_uuid: [u8; 16], friendly_name: impl Into<String>) -> Self {
         Self {
             device_uuid,
             friendly_name: friendly_name.into(),
@@ -74,8 +75,15 @@ impl DeviceConfig {
             brand: "Qonductor".to_string(),
             model: "Qonductor Rust".to_string(),
             max_audio_quality: AudioQuality::HiRes192,
-            app_id: app_id.into(),
+            auto_activate: true,
         }
+    }
+
+    /// Set whether to automatically declare as active renderer on registration.
+    /// See [`auto_activate`](DeviceConfig::auto_activate) field for details.
+    pub fn auto_activate(mut self, auto_activate: bool) -> Self {
+        self.auto_activate = auto_activate;
+        self
     }
 
     /// Returns the device UUID as a hex string (no dashes).
