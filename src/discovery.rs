@@ -21,7 +21,7 @@ use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::config::{AudioQuality, DeviceConfig, SessionInfo};
+use crate::config::{AudioQuality, ConnectCredentials, DeviceConfig};
 use crate::event::SessionEvent;
 use crate::proto::qconnect::DeviceType;
 use crate::session::{DeviceSession, SharedCommandTx};
@@ -69,8 +69,10 @@ fn audio_quality_display(quality: AudioQuality) -> &'static str {
 pub struct DeviceSelected {
     /// The device that was selected.
     pub device_uuid: [u8; 16],
-    /// Session credentials from Qobuz.
-    pub session_info: SessionInfo,
+    /// Session UUID.
+    pub session_id: String,
+    /// Connection credentials from Qobuz.
+    pub credentials: ConnectCredentials,
 }
 
 // ============================================================================
@@ -101,7 +103,6 @@ struct ConnectInfoResponse {
 struct JwtInfo {
     endpoint: Option<String>,
     jwt: String,
-    exp: u64,
 }
 
 /// Request body for POST /devices/{uuid}/connect-to-qconnect
@@ -224,21 +225,16 @@ async fn connect_to_qconnect(
         .endpoint
         .unwrap_or_else(|| "wss://play.qobuz.com/ws".to_string());
 
-    let session_info = SessionInfo {
-        session_id: req.session_id,
-        ws_endpoint,
-        ws_jwt: req.jwt_qconnect.jwt,
-        ws_jwt_exp: req.jwt_qconnect.exp,
-        api_jwt: req.jwt_api.jwt,
-        api_jwt_exp: req.jwt_api.exp,
-    };
+    let credentials = ConnectCredentials::new(ws_endpoint, req.jwt_qconnect.jwt)
+        .api_jwt(req.jwt_api.jwt);
 
     // Send device selection event
     if let Err(e) = state
         .event_tx
         .send(DeviceSelected {
             device_uuid: uuid,
-            session_info,
+            session_id: req.session_id,
+            credentials,
         })
         .await
     {

@@ -202,7 +202,7 @@ macro_rules! define_notifications {
                 device_uuid: [u8; 16],
                 renderer_id: u64,
                 /// JWT token for Qobuz API authentication.
-                api_jwt: String,
+                api_jwt: Option<String>,
             },
 
             /// Session closed (WebSocket disconnected or error).

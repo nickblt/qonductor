@@ -179,6 +179,6 @@ impl SessionManager {
             "Device selected, creating session"
         );
 
-        spawn_session(&selected.session_info, &device_config, event_tx, command_rx).await
+        spawn_session(&selected.session_id, &selected.credentials, &device_config, event_tx, command_rx).await
     }
 }

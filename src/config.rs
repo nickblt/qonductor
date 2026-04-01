@@ -97,21 +97,41 @@ impl DeviceConfig {
     }
 }
 
-/// Session information received from a Qobuz controller.
+/// Credentials for a direct WebSocket connection to Qobuz Connect.
+///
+/// Use [`ConnectCredentials::new()`] with the required WebSocket endpoint and JWT,
+/// then optionally chain [`.api_jwt()`](ConnectCredentials::api_jwt) to provide
+/// a Qobuz API token for streaming URL resolution.
+///
+/// ```ignore
+/// let creds = ConnectCredentials::new("wss://qws-us-prod.qobuz.com/ws", ws_jwt)
+///     .api_jwt(api_jwt);
+/// qonductor::connect(&creds, &config).await?;
+/// ```
 #[derive(Debug, Clone)]
-pub(crate) struct SessionInfo {
-    /// Session UUID.
-    pub session_id: String,
+pub struct ConnectCredentials {
     /// WebSocket endpoint URL.
     pub ws_endpoint: String,
-    /// JWT token for WebSocket authentication.
+    /// JWT token for WebSocket authentication (required).
     pub ws_jwt: String,
-    /// JWT expiration timestamp (for future refresh logic).
-    #[allow(dead_code)]
-    pub ws_jwt_exp: u64,
-    /// JWT token for API authentication (for streaming URLs).
-    pub api_jwt: String,
-    /// API JWT expiration timestamp.
-    #[allow(dead_code)]
-    pub api_jwt_exp: u64,
+    /// JWT token for Qobuz API calls (streaming URLs, etc.).
+    pub api_jwt: Option<String>,
 }
+
+impl ConnectCredentials {
+    /// Create credentials with the required WebSocket endpoint and JWT.
+    pub fn new(ws_endpoint: impl Into<String>, ws_jwt: impl Into<String>) -> Self {
+        Self {
+            ws_endpoint: ws_endpoint.into(),
+            ws_jwt: ws_jwt.into(),
+            api_jwt: None,
+        }
+    }
+
+    /// Set the API JWT for Qobuz API calls (streaming URLs, etc.).
+    pub fn api_jwt(mut self, api_jwt: impl Into<String>) -> Self {
+        self.api_jwt = Some(api_jwt.into());
+        self
+    }
+}
+

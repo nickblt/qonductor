@@ -55,7 +55,7 @@ pub(crate) mod discovery;
 pub(crate) mod qconnect;
 
 // Re-export main public API
-pub use config::{AudioQuality, DeviceConfig};
+pub use config::{AudioQuality, ConnectCredentials, DeviceConfig};
 pub use connection::format_qconnect_message;
 pub use discovery::DeviceTypeExt;
 pub use event::{ActivationState, Command, Notification, Responder, SessionEvent};
@@ -71,15 +71,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Connect directly to a Qobuz Connect WebSocket endpoint, bypassing mDNS/HTTP discovery.
 ///
-/// `ws_endpoint` is the WebSocket URL (e.g., `"wss://qws-us-prod.qobuz.com/ws"`).
-/// `ws_jwt` is the JWT token for WebSocket authentication.
-///
 /// This is useful when you already have credentials (e.g., from the Qobuz API) and don't
 /// need the full `SessionManager` flow. The returned [`DeviceSession`] behaves identically
 /// to one obtained via [`SessionManager::add_device()`].
+///
+/// ```ignore
+/// let creds = ConnectCredentials::new("wss://qws-us-prod.qobuz.com/ws", ws_jwt)
+///     .api_jwt(api_jwt);
+/// let session = qonductor::connect(&creds, &config).await?;
+/// ```
 pub async fn connect(
-    ws_endpoint: &str,
-    ws_jwt: &str,
+    credentials: &ConnectCredentials,
     device_config: &DeviceConfig,
 ) -> Result<DeviceSession> {
     use std::sync::Arc;
@@ -96,16 +98,7 @@ pub async fn connect(
         u.hyphenated().to_string()
     };
 
-    let session_info = config::SessionInfo {
-        session_id,
-        ws_endpoint: ws_endpoint.to_string(),
-        ws_jwt: ws_jwt.to_string(),
-        ws_jwt_exp: 0,
-        api_jwt: String::new(),
-        api_jwt_exp: 0,
-    };
-
-    qconnect::spawn_session(&session_info, device_config, event_tx, command_rx).await?;
+    qconnect::spawn_session(&session_id, credentials, device_config, event_tx, command_rx).await?;
 
     Ok(DeviceSession::new(event_rx, shared_command_tx))
 }

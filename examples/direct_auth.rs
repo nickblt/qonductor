@@ -8,8 +8,8 @@
 //! Run with debug: RUST_LOG=qonductor=debug QOBUZ_WS_JWT=xxx cargo run --example direct_auth
 
 use qonductor::{
-    ActivationState, BufferState, Command, DeviceConfig, Notification, PlayingState, SessionEvent,
-    msg,
+    ActivationState, BufferState, Command, ConnectCredentials, DeviceConfig, Notification,
+    PlayingState, SessionEvent, msg,
     msg::{LoopModeSetExt, PositionExt, QueueRendererStateExt, SetStateExt, report::VolumeChanged},
 };
 use std::env;
@@ -38,9 +38,11 @@ async fn main() {
     let ws_endpoint = env::var("QOBUZ_WS_ENDPOINT")
         .unwrap_or_else(|_| "wss://qws-us-prod.qobuz.com/ws".to_string());
 
+    let creds = ConnectCredentials::new(&ws_endpoint, &ws_jwt);
+
     println!("Connecting directly to Qobuz Connect at {ws_endpoint}...");
 
-    let mut session = match qonductor::connect(&ws_endpoint, &ws_jwt, &config).await {
+    let mut session = match qonductor::connect(&creds, &config).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to connect: {e}");
@@ -199,7 +201,7 @@ async fn main() {
                             api_jwt,
                         } => {
                             println!(
-                                "[{}] Device registered: uuid={} renderer_id={} api_jwt={}",
+                                "[{}] Device registered: uuid={} renderer_id={} api_jwt={:?}",
                                 device_name,
                                 Uuid::from_bytes(device_uuid),
                                 renderer_id,

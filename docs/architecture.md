@@ -79,7 +79,8 @@ When a user selects a device in the Qobuz app, the app makes an HTTP POST to our
 ```rust
 struct DeviceSelected {
     device_uuid: [u8; 16],
-    session_info: SessionInfo,  // Contains JWT, WebSocket endpoint
+    session_id: String,
+    credentials: ConnectCredentials,  // Contains JWT, WebSocket endpoint
 }
 ```
 

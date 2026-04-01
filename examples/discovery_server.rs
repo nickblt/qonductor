@@ -170,7 +170,7 @@ async fn handle_device_events(device_name: String, mut session: DeviceSession) {
                     api_jwt,
                 } => {
                     println!(
-                        "[{}] Device registered: uuid={} renderer_id={} api_jwt={}",
+                        "[{}] Device registered: uuid={} renderer_id={} api_jwt={:?}",
                         device_name,
                         Uuid::from_bytes(device_uuid),
                         renderer_id,

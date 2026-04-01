@@ -13,7 +13,7 @@ use tokio::time::{Duration, interval};
 use tracing::{debug, info, warn};
 
 use crate::Result;
-use crate::config::{DeviceConfig, SessionInfo};
+use crate::config::{ConnectCredentials, DeviceConfig};
 use crate::connection::{Connection, ConnectionWriter};
 use crate::event::{
     dispatch_notification, ActivationState, Command, Notification, Responder, SessionEvent,
@@ -40,20 +40,21 @@ use crate::session::SessionCommand;
 /// Events are sent to the provided `event_tx` channel.
 /// Commands are received from the `command_rx` channel.
 pub(crate) async fn spawn_session(
-    session_info: &SessionInfo,
+    session_id: &str,
+    credentials: &ConnectCredentials,
     device_config: &DeviceConfig,
     event_tx: mpsc::Sender<SessionEvent>,
     command_rx: mpsc::Receiver<SessionCommand>,
 ) -> Result<()> {
     debug!(
-        session_id = %session_info.session_id,
+        session_id = %session_id,
         device = %device_config.friendly_name,
         "Connecting session"
     );
 
     // Connect and set up the WebSocket
     let mut connection =
-        Connection::connect(&session_info.ws_endpoint, &session_info.ws_jwt).await?;
+        Connection::connect(&credentials.ws_endpoint, &credentials.ws_jwt).await?;
     connection.subscribe_default().await?;
     connection
         .join_session(&device_config.device_uuid, &device_config.friendly_name)
@@ -69,7 +70,7 @@ pub(crate) async fn spawn_session(
 
     // Create and spawn the runner
     let runner = SessionRunner {
-        session_id: session_info.session_id.clone(),
+        session_id: session_id.to_owned(),
         reader,
         writer,
         device_uuid: device_config.device_uuid,
@@ -80,7 +81,7 @@ pub(crate) async fn spawn_session(
         event_tx,
         command_rx,
         state: SessionState::default(),
-        api_jwt: session_info.api_jwt.clone(),
+        api_jwt: credentials.api_jwt.clone(),
     };
 
     tokio::spawn(async move {
@@ -124,7 +125,7 @@ struct SessionRunner {
     event_tx: mpsc::Sender<SessionEvent>,
     command_rx: mpsc::Receiver<SessionCommand>,
     state: SessionState,
-    api_jwt: String,
+    api_jwt: Option<String>,
 }
 
 impl SessionRunner {
