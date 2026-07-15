@@ -11,10 +11,10 @@ repository = "https://github.com/nickblt/qonductor"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "stream", "system-proxy"] }
 
 # WebSocket
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = "0.24"
 
 # HTTP server for discovery
 axum = "0.8"
@@ -57,6 +57,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wiremock = "0.6"
 
 [features]
+default = ["native-tls"]
+native-tls = ["reqwest/native-tls", "tokio-tungstenite/native-tls"]
+rustls-native-roots = ["reqwest/rustls-tls", "tokio-tungstenite/rustls-tls-native-roots"]
+rustls-webpki-roots = ["reqwest/rustls-tls", "tokio-tungstenite/rustls-tls-webpki-roots"]
 compile-protos = ["dep:prost-build"]
 
 [build-dependencies]
